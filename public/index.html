@@ -1,0 +1,377 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>CloudVault — Stateful WebSocket MD5 File Upload & Hash Audit</title>
+  <meta name="description" content="Stateful file upload system with WebSocket chunk streaming, MD5 verification, and state.json interruption recovery." />
+  <!-- Google Fonts -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <!-- Remix Icons CDN -->
+  <link href="https://cdn.jsdelivr.net/npm/remixicon@4.2.0/fonts/remixicon.css" rel="stylesheet" />
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div class="app-container">
+    <!-- Sidebar / Brand Navigation -->
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="brand-icon">
+          <i class="ri-cloud-fill"></i>
+        </div>
+        <div class="brand-text">
+          <h2>CloudVault</h2>
+          <span class="badge">WebSocket + MD5</span>
+        </div>
+      </div>
+
+      <nav class="nav-menu">
+        <button class="nav-item active" data-tab="repository">
+          <i class="ri-folder-2-fill"></i> File Repository
+        </button>
+        <button class="nav-item" data-tab="ws-uploader">
+          <i class="ri-upload-cloud-2-fill"></i> WebSocket Batch Uploader
+        </button>
+        <button class="nav-item" data-tab="hash-audit">
+          <i class="ri-checkbox-multiple-fill"></i> MD5 Audit Report
+        </button>
+      </nav>
+
+      <!-- Storage Breakdown Widget -->
+      <div class="storage-widget">
+        <div class="widget-header">
+          <span>Storage Stats</span>
+          <span id="storage-percentage">0%</span>
+        </div>
+        <div class="progress-bar-bg">
+          <div class="progress-bar-fill" id="storage-bar" style="width: 0%;"></div>
+        </div>
+        <div class="storage-meta">
+          <span id="storage-used-text">0 MB used</span>
+          <span>100 MB Limit</span>
+        </div>
+      </div>
+    </aside>
+
+    <!-- Main Content Area -->
+    <main class="main-content">
+      
+      <!-- TAB 1: File Repository -->
+      <div class="tab-page active" id="tab-repository">
+        <header class="top-bar">
+          <div class="search-box">
+            <i class="ri-search-line"></i>
+            <input type="text" id="search-input" placeholder="Search files by name or MD5..." />
+          </div>
+          
+          <div class="top-actions">
+            <div class="view-toggle">
+              <button class="icon-btn active" id="grid-view-btn" title="Grid View">
+                <i class="ri-grid-fill"></i>
+              </button>
+              <button class="icon-btn" id="list-view-btn" title="List View">
+                <i class="ri-list-check"></i>
+              </button>
+            </div>
+            
+            <select id="sort-select" class="sort-dropdown">
+              <option value="date-desc">Newest First</option>
+              <option value="date-asc">Oldest First</option>
+              <option value="name-asc">Name (A-Z)</option>
+              <option value="size-desc">Size (Largest)</option>
+              <option value="size-asc">Size (Smallest)</option>
+            </select>
+
+            <button class="btn btn-primary" id="trigger-upload-btn">
+              <i class="ri-upload-cloud-2-line"></i> Quick Upload
+            </button>
+          </div>
+        </header>
+
+        <!-- Dropzone Area -->
+        <section class="dropzone-section">
+          <div class="dropzone" id="dropzone">
+            <input type="file" id="file-input" multiple hidden />
+            <div class="dropzone-icon">
+              <i class="ri-upload-2-line"></i>
+            </div>
+            <div class="dropzone-text">
+              <h3>Drag & Drop files here or <span class="highlight">Browse</span></h3>
+              <p>Upload documents, images, code, or media files up to 100 MB each</p>
+            </div>
+            <div class="upload-progress-container hidden" id="upload-progress-container">
+              <div class="upload-status">
+                <span id="upload-status-text">Uploading 0 files...</span>
+                <span id="upload-percent">0%</span>
+              </div>
+              <div class="progress-bar-bg">
+                <div class="progress-bar-fill" id="upload-progress-bar" style="width: 0%;"></div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- File Gallery Header -->
+        <div class="section-header">
+          <h2 id="gallery-title">Repository Files</h2>
+          <span class="file-count-badge" id="file-count">0 items</span>
+        </div>
+
+        <!-- File Grid / List Container -->
+        <section class="files-container grid-layout" id="files-container">
+          <!-- Dynamic items will be injected here -->
+        </section>
+
+        <!-- Empty State -->
+        <div class="empty-state hidden" id="empty-state">
+          <div class="empty-icon"><i class="ri-folder-open-line"></i></div>
+          <h3>No files found</h3>
+          <p>Upload files to see them listed in your repository storage.</p>
+        </div>
+      </div>
+
+      <!-- TAB 2: WebSocket Stateful Uploader -->
+      <div class="tab-page hidden" id="tab-ws-uploader">
+        <header class="tab-header">
+          <div>
+            <h2><i class="ri-upload-cloud-2-line"></i> WebSocket Stateful Batch Uploader</h2>
+            <p>High-volume file transfer engine with MD5 checksum verification & state.json interruption resumption</p>
+          </div>
+          <span class="status-chip success"><i class="ri-checkbox-circle-fill"></i> State Persisted: state.json</span>
+        </header>
+
+        <!-- Scanner Configuration Card -->
+        <div class="card config-card">
+          <h3><i class="ri-settings-4-line"></i> Source Directory & Server Setup</h3>
+          <p class="card-subtitle">Supports Windows 11 paths (e.g. <code>D:\marriage</code>, <code>C:\Users\...</code>) and Linux paths.</p>
+          
+          <div class="form-grid">
+            <div class="form-group">
+              <label for="ws-source-path"><i class="ri-folder-path-line"></i> Target Local Folder Path:</label>
+              <input type="text" id="ws-source-path" class="text-input" placeholder="e.g. D:\marriage or /var/www/hello/my/files-area" value="/var/www/hello/my/files-area" />
+            </div>
+
+            <div class="form-group">
+              <label for="ws-server-url"><i class="ri-server-line"></i> WebSocket Remote Server URL:</label>
+              <input type="text" id="ws-server-url" class="text-input" placeholder="ws://localhost:3000/ws/upload" value="ws://localhost:3000/ws/upload" />
+            </div>
+          </div>
+
+          <div class="action-row">
+            <button class="btn btn-secondary" id="ws-scan-btn">
+              <i class="ri-search-eye-line"></i> Scan & Generate Hashes
+            </button>
+            <button class="btn btn-primary" id="ws-start-upload-btn">
+              <i class="ri-play-circle-line"></i> Start / Resume WebSocket Upload
+            </button>
+            <button class="btn btn-danger hidden" id="ws-pause-upload-btn">
+              <i class="ri-pause-circle-line"></i> Pause Upload
+            </button>
+          </div>
+        </div>
+
+        <!-- Live Progress Dashboard -->
+        <div class="card dashboard-card">
+          <div class="dashboard-header">
+            <h3><i class="ri-pulse-line"></i> Live Session Progress</h3>
+            <span class="status-chip neutral" id="ws-session-status">Idle</span>
+          </div>
+
+          <div class="stats-overview">
+            <div class="stat-box">
+              <span class="stat-label">Files Uploaded</span>
+              <span class="stat-value" id="stat-files">0 / 0</span>
+            </div>
+            <div class="stat-box">
+              <span class="stat-label">Data Transferred</span>
+              <span class="stat-value" id="stat-bytes">0 MB / 0 MB</span>
+            </div>
+            <div class="stat-box">
+              <span class="stat-label">Transfer Speed</span>
+              <span class="stat-value" id="stat-speed">0 MB/s</span>
+            </div>
+            <div class="stat-box">
+              <span class="stat-label">Est. Time Remaining</span>
+              <span class="stat-value" id="stat-eta">--</span>
+            </div>
+          </div>
+
+          <div class="overall-progress-wrapper">
+            <div class="progress-info">
+              <span>Overall Completion</span>
+              <span id="stat-percent-text">0%</span>
+            </div>
+            <div class="progress-bar-bg large">
+              <div class="progress-bar-fill" id="ws-overall-progress" style="width: 0%;"></div>
+            </div>
+          </div>
+
+          <div class="current-file-box hidden" id="ws-current-file-box">
+            <div class="current-file-name">
+              <span><i class="ri-file-transfer-line"></i> Active: <strong id="ws-active-file-name">file.ext</strong></span>
+              <span id="ws-active-file-pct">0%</span>
+            </div>
+            <div class="progress-bar-bg">
+              <div class="progress-bar-fill animated" id="ws-active-file-bar" style="width: 0%;"></div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Queue Table -->
+        <div class="card table-card">
+          <div class="card-header-flex">
+            <h3><i class="ri-list-check-2"></i> File Batch Queue & Hash Status</h3>
+            <button class="btn btn-secondary btn-sm" id="ws-run-audit-btn">
+              <i class="ri-refresh-line"></i> Run Server MD5 Audit
+            </button>
+          </div>
+
+          <div class="table-wrapper">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th>Relative Path</th>
+                  <th>Size</th>
+                  <th>Client MD5</th>
+                  <th>Server MD5</th>
+                  <th>Status</th>
+                  <th>Match</th>
+                </tr>
+              </thead>
+              <tbody id="ws-queue-tbody">
+                <tr>
+                  <td colspan="6" class="text-center text-muted">Click "Scan & Generate Hashes" to load target directory files.</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <!-- TAB 3: MD5 Verification Audit Report -->
+      <div class="tab-page hidden" id="tab-hash-audit">
+        <header class="tab-header">
+          <div>
+            <h2><i class="ri-shield-check-line"></i> Server vs Client MD5 Audit Report</h2>
+            <p>Verification engine verifying total files uploaded against source hashes</p>
+          </div>
+          <button class="btn btn-primary" id="audit-refresh-btn">
+            <i class="ri-scan-line"></i> Run Audit Now
+          </button>
+        </header>
+
+        <div class="audit-metrics">
+          <div class="audit-card total">
+            <i class="ri-file-copy-2-line"></i>
+            <div>
+              <h4 id="audit-total-count">0</h4>
+              <p>Total Files</p>
+            </div>
+          </div>
+          <div class="audit-card matched">
+            <i class="ri-checkbox-circle-line"></i>
+            <div>
+              <h4 id="audit-match-count">0</h4>
+              <p>MD5 Verified Match</p>
+            </div>
+          </div>
+          <div class="audit-card mismatched">
+            <i class="ri-error-warning-line"></i>
+            <div>
+              <h4 id="audit-mismatch-count">0</h4>
+              <p>Hash Mismatch</p>
+            </div>
+          </div>
+          <div class="audit-card missing">
+            <i class="ri-file-warning-line"></i>
+            <div>
+              <h4 id="audit-missing-count">0</h4>
+              <p>Missing on Server</p>
+            </div>
+          </div>
+        </div>
+
+        <div class="card table-card">
+          <div class="table-wrapper">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th>File Name</th>
+                  <th>Size</th>
+                  <th>Client MD5</th>
+                  <th>Server Computed MD5</th>
+                  <th>Audit Status</th>
+                </tr>
+              </thead>
+              <tbody id="audit-tbody">
+                <tr>
+                  <td colspan="5" class="text-center text-muted">Click "Run Audit Now" to perform MD5 hash verification across all uploaded files.</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+    </main>
+  </div>
+
+  <!-- Preview Modal -->
+  <div class="modal-overlay hidden" id="preview-modal">
+    <div class="modal-card">
+      <header class="modal-header">
+        <div class="file-title-wrap">
+          <i class="file-category-icon ri-file-line" id="modal-icon"></i>
+          <h3 id="modal-filename">filename.ext</h3>
+        </div>
+        <div class="modal-actions">
+          <a href="#" download id="modal-download-btn" class="btn btn-secondary icon-only" title="Download">
+            <i class="ri-download-2-line"></i>
+          </a>
+          <button class="btn btn-secondary icon-only" id="modal-close-btn">
+            <i class="ri-close-line"></i>
+          </button>
+        </div>
+      </header>
+      <div class="modal-body" id="modal-body-content">
+        <!-- Dynamic preview content -->
+      </div>
+      <footer class="modal-footer">
+        <div class="meta-tag" id="modal-size">Size: 0 KB</div>
+        <div class="meta-tag" id="modal-date">Date: N/A</div>
+        <div class="meta-tag" id="modal-type">Type: N/A</div>
+        <div class="meta-tag" id="modal-md5">MD5: N/A</div>
+      </footer>
+    </div>
+  </div>
+
+  <!-- Rename Modal -->
+  <div class="modal-overlay hidden" id="rename-modal">
+    <div class="modal-card small-modal">
+      <header class="modal-header">
+        <h3>Rename File</h3>
+        <button class="btn btn-secondary icon-only" id="rename-close-btn">
+          <i class="ri-close-line"></i>
+        </button>
+      </header>
+      <div class="modal-body">
+        <input type="hidden" id="rename-old-name" />
+        <label for="rename-input">Enter new file name:</label>
+        <input type="text" id="rename-input" class="text-input" placeholder="new-file-name.ext" />
+      </div>
+      <footer class="modal-footer right-align">
+        <button class="btn btn-secondary" id="rename-cancel-btn">Cancel</button>
+        <button class="btn btn-primary" id="rename-save-btn">Save Changes</button>
+      </footer>
+    </div>
+  </div>
+
+  <!-- Toast Container -->
+  <div class="toast-container" id="toast-container"></div>
+
+  <script src="app.js"></script>
+  <script src="ws-uploader-ui.js"></script>
+</body>
+</html>

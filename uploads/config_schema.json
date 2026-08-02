@@ -1,0 +1,21 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "StorageConfig",
+  "type": "object",
+  "properties": {
+    "maxFileSize": {
+      "type": "integer",
+      "default": 104857600
+    },
+    "allowedCategories": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "enableCompression": {
+      "type": "boolean",
+      "default": true
+    }
+  }
+}
