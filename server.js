@@ -43,7 +43,12 @@ const upload = multer({
 });
 
 app.use(express.json());
-app.use(express.static(path.join(__dirname, 'public')));
+const DIST_DIR = path.join(__dirname, 'dist');
+if (fs.existsSync(DIST_DIR)) {
+  app.use(express.static(DIST_DIR));
+} else {
+  app.use(express.static(path.join(__dirname, 'public')));
+}
 app.use('/uploads', express.static(UPLOADS_DIR));
 
 // File Category Helper

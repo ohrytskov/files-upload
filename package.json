@@ -1,24 +1,37 @@
 {
   "name": "files-upload-repo",
   "version": "1.0.0",
-  "description": "Full-stack file upload and management application built with Node.js and modern Web UI",
+  "description": "Full-stack file upload and management application built with Node.js, Express, React, and Vite",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "dev": "node --watch server.js"
+    "server": "node --watch server.js",
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
   },
   "keywords": [
     "file-upload",
     "storage",
     "nodejs",
     "express",
-    "fs"
+    "react",
+    "vite",
+    "md5",
+    "websocket"
   ],
   "author": "",
   "license": "ISC",
   "dependencies": {
     "express": "^4.19.2",
+    "lucide-react": "^1.28.0",
     "multer": "^1.4.5-lts.1",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8",
     "ws": "^8.21.1"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^6.0.5",
+    "vite": "^8.2.0"
   }
 }
