@@ -39,7 +39,7 @@ export default function PreviewModal({ file, onClose }) {
             <video controls src={file.url} style={{ maxWidth: '100%', maxHeight: '50vh' }}></video>
           ) : (
             <div style={{ padding: '40px 0', color: '#94a3b8' }}>
-              <File size={64} color="#6366f1" style={{ margin: '0 auto 16px display: block' }} />
+              <File size={64} color="#6366f1" style={{ margin: '0 auto 16px', display: 'block' }} />
               <p>File preview not directly playable in browser.</p>
               <a href={file.url} download className="btn btn-primary" style={{ marginTop: '16px', display: 'inline-flex' }}>
                 Download to View File
