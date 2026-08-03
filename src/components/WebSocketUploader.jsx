@@ -1,9 +1,9 @@
-import React, { useState, useEffect, useRef } from 'react';
-import { Search, Play, Pause, RefreshCw, CheckCircle2, AlertCircle, Clock, Zap, FileText } from 'lucide-react';
+import React, { useEffect, useRef, useState } from 'react';
+import { Play, Pause, CheckCircle2, AlertCircle } from 'lucide-react';
+import { md5ArrayBuffer } from '../utils/md5';
 
 export default function WebSocketUploader({ onAuditTrigger }) {
-  const [sourcePath, setSourcePath] = useState('/var/www/hello/my/files-area');
-  const [serverUrl, setServerUrl] = useState(`ws://${window.location.host}/ws/upload`);
+  const [serverUrl, setServerUrl] = useState(`${window.location.protocol === 'https:' ? 'wss' : 'ws'}://${window.location.host}/ws/upload`);
   const [manifest, setManifest] = useState(null);
   const [isScanning, setIsScanning] = useState(false);
   const [isUploading, setIsUploading] = useState(false);
@@ -24,42 +24,63 @@ export default function WebSocketUploader({ onAuditTrigger }) {
   });
 
   const socketRef = useRef(null);
+  const manifestRef = useRef(null);
   const startTimeRef = useRef(null);
   const transferredBytesRef = useRef(0);
+  const lastOffsetsRef = useRef({});
 
-  const handleScan = async () => {
-    if (!sourcePath.trim()) return;
+  useEffect(() => {
+    manifestRef.current = manifest;
+  }, [manifest]);
+
+  const handleFilesSelected = async (event) => {
+    const selectedFiles = Array.from(event.target.files || []);
+    if (selectedFiles.length === 0) return;
+
     setIsScanning(true);
     try {
-      const res = await fetch('/api/hash/scan', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ sourcePath })
-      });
-      const data = await res.json();
-      if (res.ok) {
-        setManifest(data);
-        setSessionStatus('Scanned & Ready');
-        setStats(prev => ({
-          ...prev,
-          totalFiles: data.totalFiles,
-          totalBytes: data.totalBytes
-        }));
-      } else {
-        alert(data.error || 'Failed to scan path');
+      const seenPaths = new Set();
+      const files = [];
+      let totalBytes = 0;
+
+      for (const file of selectedFiles) {
+        const relativePath = (file.webkitRelativePath || file.name).replace(/\\/g, '/');
+        if (seenPaths.has(relativePath)) {
+          throw new Error(`Duplicate file path selected: ${relativePath}`);
+        }
+
+        seenPaths.add(relativePath);
+        files.push({
+          file,
+          relativePath,
+          size: file.size,
+          md5: md5ArrayBuffer(await file.arrayBuffer()),
+          status: 'pending',
+          offset: 0,
+          serverMd5: null
+        })
+        totalBytes += file.size;
       }
-    } catch (e) {
-      alert('Error connecting to scan API');
+
+      const data = {
+        sourcePath: 'browser-selection',
+        totalFiles: files.length,
+        totalBytes,
+        files
+      };
+      manifestRef.current = data;
+      setManifest(data);
+      setSessionStatus('Files Hashed & Ready');
+      setStats(prev => ({ ...prev, totalFiles: data.totalFiles, totalBytes: data.totalBytes }));
+    } catch (error) {
+      alert(error.message || 'Failed to read selected files');
     } finally {
       setIsScanning(false);
     }
   };
 
   const startUpload = () => {
-    if (!manifest) {
-      handleScan();
-      return;
-    }
+    if (!manifestRef.current) return;
 
     if (isPaused && socketRef.current && socketRef.current.readyState === WebSocket.OPEN) {
       setIsPaused(false);
@@ -83,8 +104,8 @@ export default function WebSocketUploader({ onAuditTrigger }) {
         type: 'INIT_SESSION',
         payload: {
           sessionId: `session_${Date.now()}`,
-          sourcePath,
-          files: manifest.files
+          sourcePath: 'browser-selection',
+          files: manifestRef.current.files.map(({ file, ...fileItem }) => fileItem)
         }
       }));
     };
@@ -106,9 +127,11 @@ export default function WebSocketUploader({ onAuditTrigger }) {
 
     if (type === 'SESSION_READY') {
       const { files: serverFiles } = payload;
-      setManifest(prev => {
-        if (!prev) return prev;
-        const updated = prev.files.map(f => {
+      const currentManifest = manifestRef.current;
+      if (!currentManifest) return;
+      const updated = {
+        ...currentManifest,
+        files: currentManifest.files.map(f => {
           const sf = serverFiles[f.relativePath];
           return {
             ...f,
@@ -116,20 +139,24 @@ export default function WebSocketUploader({ onAuditTrigger }) {
             status: sf ? sf.status || 'pending' : 'pending',
             serverMd5: sf ? sf.serverMd5 : null
           };
-        });
-        return { ...prev, files: updated };
-      });
+        })
+      };
+      manifestRef.current = updated;
+      setManifest(updated);
       uploadNextFile();
     } else if (type === 'FILE_STARTED') {
       sendChunk(payload.relativePath, payload.offset);
     } else if (type === 'CHUNK_ACK') {
       const { relativePath, offset } = payload;
-      transferredBytesRef.current += (256 * 1024);
+      const previousOffset = lastOffsetsRef.current[relativePath] || 0;
+      transferredBytesRef.current += Math.max(0, offset - previousOffset);
+      lastOffsetsRef.current[relativePath] = offset;
       updateProgress(relativePath, offset);
 
-      const file = manifest.files.find(f => f.relativePath === relativePath);
+      const currentManifest = manifestRef.current;
+      const file = currentManifest && currentManifest.files.find(f => f.relativePath === relativePath);
       if (file && offset >= file.size) {
-        socketRef.current.send(JSON.stringify({
+        socketRef.current?.send(JSON.stringify({
           type: 'FINISH_FILE',
           payload: { relativePath, clientMd5: file.md5 }
         }));
@@ -137,16 +164,20 @@ export default function WebSocketUploader({ onAuditTrigger }) {
         sendChunk(relativePath, offset);
       }
     } else if (type === 'FILE_VERIFIED') {
-      setManifest(prev => ({
-        ...prev,
-        files: prev.files.map(f => f.relativePath === payload.relativePath ? { ...f, status: 'verified', serverMd5: payload.serverMd5, match: true } : f)
-      }));
+      const updated = {
+        ...manifestRef.current,
+        files: manifestRef.current.files.map(f => f.relativePath === payload.relativePath ? { ...f, status: 'verified', serverMd5: payload.serverMd5, match: true } : f)
+      };
+      manifestRef.current = updated;
+      setManifest(updated);
       uploadNextFile();
     } else if (type === 'FILE_ERROR') {
-      setManifest(prev => ({
-        ...prev,
-        files: prev.files.map(f => f.relativePath === payload.relativePath ? { ...f, status: 'failed', serverMd5: payload.serverMd5 || null, match: false } : f)
-      }));
+      const updated = {
+        ...manifestRef.current,
+        files: manifestRef.current.files.map(f => f.relativePath === payload.relativePath ? { ...f, status: 'failed', serverMd5: payload.serverMd5 || null, match: false } : f)
+      };
+      manifestRef.current = updated;
+      setManifest(updated);
       uploadNextFile();
     } else if (type === 'AUDIT_COMPLETE') {
       setIsUploading(false);
@@ -156,46 +187,56 @@ export default function WebSocketUploader({ onAuditTrigger }) {
   };
 
   const uploadNextFile = () => {
-    if (isPaused || !socketRef.current) return;
+    if (isPaused || !socketRef.current || socketRef.current.readyState !== WebSocket.OPEN) return;
 
-    setManifest(currentManifest => {
-      const pending = currentManifest.files.find(f => f.status === 'pending' || f.status === 'uploading');
+    const currentManifest = manifestRef.current;
+    if (!currentManifest) return;
+    const pending = currentManifest.files.find(f => f.status === 'pending' || f.status === 'uploading');
 
-      if (!pending) {
-        setSessionStatus('Running MD5 Server Audit...');
-        socketRef.current.send(JSON.stringify({ type: 'RUN_FULL_AUDIT' }));
-        return currentManifest;
+    if (!pending) {
+      setSessionStatus('Running MD5 Server Audit...');
+      socketRef.current.send(JSON.stringify({ type: 'RUN_FULL_AUDIT' }));
+      return;
+    }
+
+    const updated = {
+      ...currentManifest,
+      files: currentManifest.files.map(f => f.relativePath === pending.relativePath ? { ...f, status: 'uploading' } : f)
+    };
+    manifestRef.current = updated;
+    setManifest(updated);
+    socketRef.current.send(JSON.stringify({
+      type: 'START_FILE',
+      payload: {
+        relativePath: pending.relativePath,
+        size: pending.size,
+        clientMd5: pending.md5,
+        offset: pending.offset || 0
       }
-
-      socketRef.current.send(JSON.stringify({
-        type: 'START_FILE',
-        payload: {
-          relativePath: pending.relativePath,
-          size: pending.size,
-          clientMd5: pending.md5,
-          offset: pending.offset || 0
-        }
-      }));
-
-      return {
-        ...currentManifest,
-        files: currentManifest.files.map(f => f.relativePath === pending.relativePath ? { ...f, status: 'uploading' } : f)
-      };
-    });
+    }));
   };
 
-  const sendChunk = (relativePath, offset) => {
+  const sendChunk = async (relativePath, offset) => {
     if (!socketRef.current || isPaused) return;
-    const chunkSize = 256 * 1024;
-    const file = manifest.files.find(f => f.relativePath === relativePath);
-    const end = Math.min(offset + chunkSize, file.size);
-    const dummyChunk = new Array(end - offset + 1).join('x');
-    const base64Data = btoa(dummyChunk);
+    const fileItem = manifestRef.current?.files.find(f => f.relativePath === relativePath);
+    if (!fileItem || !fileItem.file) return;
 
-    socketRef.current.send(JSON.stringify({
-      type: 'FILE_CHUNK',
-      payload: { relativePath, offset, data: base64Data }
-    }));
+    try {
+      const end = Math.min(offset + 256 * 1024, fileItem.size);
+      const buffer = await fileItem.file.slice(offset, end).arrayBuffer();
+      if (isPaused || socketRef.current?.readyState !== WebSocket.OPEN) return;
+
+      const bytes = new Uint8Array(buffer);
+      let binary = '';
+      for (const byte of bytes) binary += String.fromCharCode(byte);
+
+      socketRef.current.send(JSON.stringify({
+        type: 'FILE_CHUNK',
+        payload: { relativePath, offset, data: btoa(binary) }
+      }));
+    } catch (error) {
+      alert(`Failed to read ${relativePath}: ${error.message}`);
+    }
   };
 
   const updateProgress = (relativePath, offset) => {
@@ -203,12 +244,13 @@ export default function WebSocketUploader({ onAuditTrigger }) {
     const speedBps = elapsedSec > 0 ? (transferredBytesRef.current / elapsedSec) : 0;
     const speedMB = (speedBps / (1024 * 1024)).toFixed(2);
 
-    if (manifest) {
+    const currentManifest = manifestRef.current;
+    if (currentManifest) {
       let totalUploaded = 0;
       let completedCount = 0;
       let activeFileObj = null;
 
-      for (const f of manifest.files) {
+      for (const f of currentManifest.files) {
         if (f.status === 'verified') {
           completedCount++;
           totalUploaded += f.size;
@@ -218,16 +260,16 @@ export default function WebSocketUploader({ onAuditTrigger }) {
         }
       }
 
-      const overallPct = Math.round((totalUploaded / manifest.totalBytes) * 100);
+      const overallPct = Math.round((totalUploaded / currentManifest.totalBytes) * 100);
       const filePct = activeFileObj ? Math.round((offset / activeFileObj.size) * 100) : 0;
-      const remainingBytes = manifest.totalBytes - totalUploaded;
+      const remainingBytes = currentManifest.totalBytes - totalUploaded;
       const etaSec = speedBps > 0 ? Math.ceil(remainingBytes / speedBps) : 0;
 
       setStats({
         filesCount: completedCount,
-        totalFiles: manifest.totalFiles,
+        totalFiles: currentManifest.totalFiles,
         uploadedBytes: totalUploaded,
-        totalBytes: manifest.totalBytes,
+        totalBytes: currentManifest.totalBytes,
         speedMB,
         eta: etaSec > 0 ? `${Math.ceil(etaSec / 60)}m ${etaSec % 60}s` : 'Done',
         overallPct,
@@ -253,19 +295,14 @@ export default function WebSocketUploader({ onAuditTrigger }) {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '24px' }}>
       <div className="card">
-        <h3>Target Folder & Server Setup</h3>
-        <p className="card-subtitle">Supports Windows 11 paths (e.g. <code>D:\marriage</code>) & Linux paths</p>
+        <h3>Select Files & Server Setup</h3>
+        <p className="card-subtitle">Choose individual files or a directory. File contents are read locally by your browser.</p>
 
         <div className="form-grid">
           <div className="form-group">
-            <label>Local Target Folder Path:</label>
-            <input
-              type="text"
-              className="text-input"
-              value={sourcePath}
-              onChange={(e) => setSourcePath(e.target.value)}
-              placeholder="e.g. D:\marriage or /var/www/hello/my/files-area"
-            />
+            <label>Files or directory:</label>
+            <input type="file" className="text-input" multiple webkitdirectory="true" directory="true" onChange={handleFilesSelected} />
+            <small>{manifest ? `${manifest.totalFiles} file(s) selected` : 'No files selected'}</small>
           </div>
 
           <div className="form-group">
@@ -281,10 +318,10 @@ export default function WebSocketUploader({ onAuditTrigger }) {
         </div>
 
         <div style={{ display: 'flex', gap: '12px', marginTop: '8px' }}>
-          <button className="btn btn-secondary" onClick={handleScan} disabled={isScanning}>
-            <Search size={16} /> {isScanning ? 'Scanning...' : 'Scan & Generate Hashes'}
-          </button>
-          <button className="btn btn-primary" onClick={startUpload} disabled={isUploading && !isPaused}>
+          <span className="status-chip neutral">
+            {isScanning ? 'Hashing selected files...' : 'Select files above to generate hashes'}
+          </span>
+          <button className="btn btn-primary" onClick={startUpload} disabled={!manifest || isUploading && !isPaused}>
             <Play size={16} /> {isPaused ? 'Resume Upload' : 'Start / Resume Stateful Upload'}
           </button>
           {isUploading && (
