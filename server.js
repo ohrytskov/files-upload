@@ -6,11 +6,13 @@ const multer = require('multer');
 
 const { initWebSocketServer, calculateServerMd5 } = require('./lib/ws-server');
 const { generateHashes } = require('./lib/hash-generator');
+const { normalizeFilename, resolveSafePath } = require('./lib/path-utils');
 const StateManager = require('./lib/state-manager');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 const UPLOADS_DIR = path.join(__dirname, 'uploads');
+const HASH_SCAN_ROOT = path.resolve(process.env.HASH_SCAN_ROOT || UPLOADS_DIR);
 
 // Ensure uploads directory exists
 if (!fs.existsSync(UPLOADS_DIR)) {
@@ -23,9 +25,16 @@ const storage = multer.diskStorage({
     cb(null, UPLOADS_DIR);
   },
   filename: (req, file, cb) => {
-    const ext = path.extname(file.originalname);
-    const baseName = path.basename(file.originalname, ext);
-    let finalName = file.originalname;
+    let originalName;
+    try {
+      originalName = normalizeFilename(path.basename(file.originalname.replace(/\\/g, '/')));
+    } catch (err) {
+      return cb(new Error('Invalid upload filename'));
+    }
+
+    const ext = path.extname(originalName);
+    const baseName = path.basename(originalName, ext);
+    let finalName = originalName;
     
     let counter = 1;
     while (fs.existsSync(path.join(UPLOADS_DIR, finalName))) {
@@ -70,6 +79,10 @@ function getFileCategory(filename) {
   return 'other';
 }
 
+function isInternalUploadFile(filename) {
+  return filename === 'server_state.json' || filename.endsWith('.tmp');
+}
+
 // 1. Get all files with metadata & MD5 hash
 app.get('/api/files', async (req, res) => {
   try {
@@ -77,7 +90,7 @@ app.get('/api/files', async (req, res) => {
     const fileList = [];
 
     for (const file of files) {
-      if (file.endsWith('.json') || file.endsWith('.tmp')) continue; // Skip state files
+      if (isInternalUploadFile(file)) continue;
       const filePath = path.join(UPLOADS_DIR, file);
       try {
         const stats = fs.statSync(filePath);
@@ -172,7 +185,12 @@ app.get('/api/stats', (req, res) => {
 // 4. Delete file
 app.delete('/api/files/:filename', (req, res) => {
   const filename = req.params.filename;
-  const filePath = path.join(UPLOADS_DIR, filename);
+  let filePath;
+  try {
+    filePath = resolveSafePath(UPLOADS_DIR, normalizeFilename(filename)).resolved;
+  } catch (err) {
+    return res.status(400).json({ error: 'Invalid filename' });
+  }
 
   if (!fs.existsSync(filePath)) {
     return res.status(404).json({ error: 'File not found' });
@@ -195,8 +213,14 @@ app.patch('/api/files/:filename', (req, res) => {
     return res.status(400).json({ error: 'New name is required' });
   }
 
-  const oldPath = path.join(UPLOADS_DIR, oldName);
-  const newPath = path.join(UPLOADS_DIR, newName);
+  let oldPath;
+  let newPath;
+  try {
+    oldPath = resolveSafePath(UPLOADS_DIR, normalizeFilename(oldName)).resolved;
+    newPath = resolveSafePath(UPLOADS_DIR, normalizeFilename(newName)).resolved;
+  } catch (err) {
+    return res.status(400).json({ error: 'Invalid filename' });
+  }
 
   if (!fs.existsSync(oldPath)) {
     return res.status(404).json({ error: 'Source file not found' });
@@ -222,10 +246,16 @@ app.post('/api/hash/scan', async (req, res) => {
   }
 
   try {
-    const result = await generateHashes({ sourcePath, outputFile });
+    const source = resolveSafePath(HASH_SCAN_ROOT, path.isAbsolute(sourcePath)
+      ? path.relative(HASH_SCAN_ROOT, sourcePath)
+      : sourcePath);
+    const safeOutputFile = outputFile
+      ? resolveSafePath(HASH_SCAN_ROOT, outputFile).resolved
+      : null;
+    const result = await generateHashes({ sourcePath: source.resolved, outputFile: safeOutputFile });
     res.json(result);
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    res.status(403).json({ error: 'Hash scans are restricted to the configured scan directory' });
   }
 });
 
