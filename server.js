@@ -13,6 +13,7 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 const UPLOADS_DIR = path.join(__dirname, 'uploads');
 const HASH_SCAN_ROOT = path.resolve(process.env.HASH_SCAN_ROOT || UPLOADS_DIR);
+const md5Cache = new Map();
 
 // Ensure uploads directory exists
 if (!fs.existsSync(UPLOADS_DIR)) {
@@ -83,6 +84,29 @@ function isInternalUploadFile(filename) {
   return filename === 'server_state.json' || filename.endsWith('.tmp');
 }
 
+function getCachedServerMd5(filePath, stats) {
+  const cacheKey = path.resolve(filePath);
+  const cached = md5Cache.get(cacheKey);
+  if (cached && cached.size === stats.size && cached.mtimeMs === stats.mtimeMs) {
+    return cached.md5;
+  }
+
+  const pending = calculateServerMd5(filePath);
+  md5Cache.set(cacheKey, { size: stats.size, mtimeMs: stats.mtimeMs, md5: pending });
+  pending.then(md5 => {
+    const current = md5Cache.get(cacheKey);
+    if (current && current.md5 === pending) current.md5 = md5;
+  }).catch(() => {
+    const current = md5Cache.get(cacheKey);
+    if (current && current.md5 === pending) md5Cache.delete(cacheKey);
+  });
+  return pending;
+}
+
+function invalidateMd5Cache(...filePaths) {
+  filePaths.forEach(filePath => md5Cache.delete(path.resolve(filePath)));
+}
+
 // 1. Get all files with metadata & MD5 hash
 app.get('/api/files', async (req, res) => {
   try {
@@ -96,7 +120,7 @@ app.get('/api/files', async (req, res) => {
         const stats = fs.statSync(filePath);
         if (!stats.isFile()) continue;
 
-        const serverMd5 = await calculateServerMd5(filePath);
+        const serverMd5 = await getCachedServerMd5(filePath, stats);
 
         fileList.push({
           name: file,
@@ -200,6 +224,7 @@ app.delete('/api/files/:filename', (req, res) => {
     if (err) {
       return res.status(500).json({ error: 'Failed to delete file' });
     }
+    invalidateMd5Cache(filePath);
     res.json({ message: 'File deleted successfully', filename });
   });
 });
@@ -234,6 +259,7 @@ app.patch('/api/files/:filename', (req, res) => {
     if (err) {
       return res.status(500).json({ error: 'Failed to rename file' });
     }
+    invalidateMd5Cache(oldPath, newPath);
     res.json({ message: 'File renamed successfully', oldName, newName });
   });
 });
