@@ -246,8 +246,10 @@ app.get('/api/hash/state', (req, res) => {
 const server = http.createServer(app);
 const { wss, stateManager } = initWebSocketServer(server, UPLOADS_DIR);
 
-server.listen(PORT, () => {
-  console.log(`🚀 Server running on http://localhost:${PORT}`);
-  console.log(`⚡ WebSocket Upload Endpoint: ws://localhost:${PORT}/ws/upload`);
+const HOST = process.env.HOST || '0.0.0.0';
+
+server.listen(PORT, HOST, () => {
+  console.log(`🚀 Server running on http://${HOST}:${PORT}`);
+  console.log(`⚡ WebSocket Upload Endpoint: ws://${HOST}:${PORT}/ws/upload`);
   console.log(`📁 Target Uploads Directory: ${UPLOADS_DIR}`);
 });
