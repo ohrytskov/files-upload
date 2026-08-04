@@ -2,6 +2,23 @@ import React, { useEffect, useRef, useState } from 'react';
 import { Play, Pause, CheckCircle2, AlertCircle } from 'lucide-react';
 import { md5ArrayBuffer } from '../utils/md5';
 
+const CHUNK_SIZE = 256 * 1024;
+
+function encodeBinaryChunk(relativePath, offset, arrayBuffer) {
+  const header = new TextEncoder().encode(JSON.stringify({
+    type: 'FILE_CHUNK',
+    relativePath,
+    offset
+  }));
+  if (header.byteLength > 64 * 1024) throw new Error('Chunk metadata is too large');
+
+  const frame = new Uint8Array(4 + header.byteLength + arrayBuffer.byteLength);
+  new DataView(frame.buffer).setUint32(0, header.byteLength);
+  frame.set(header, 4);
+  frame.set(new Uint8Array(arrayBuffer), 4 + header.byteLength);
+  return frame.buffer;
+}
+
 export default function WebSocketUploader({ onAuditTrigger, authToken, onNotify }) {
   const [serverUrl, setServerUrl] = useState(`${window.location.protocol === 'https:' ? 'wss' : 'ws'}://${window.location.host}/ws/upload`);
   const [manifest, setManifest] = useState(null);
@@ -242,18 +259,19 @@ export default function WebSocketUploader({ onAuditTrigger, authToken, onNotify 
     if (!fileItem || !fileItem.file) return;
 
     try {
-      const end = Math.min(offset + 256 * 1024, fileItem.size);
+      const end = Math.min(offset + CHUNK_SIZE, fileItem.size);
+      if (end <= offset) {
+        socketRef.current.send(JSON.stringify({
+          type: 'FINISH_FILE',
+          payload: { relativePath, clientMd5: fileItem.md5 }
+        }));
+        return;
+      }
+
       const buffer = await fileItem.file.slice(offset, end).arrayBuffer();
       if (isPaused || socketRef.current?.readyState !== WebSocket.OPEN) return;
 
-      const bytes = new Uint8Array(buffer);
-      let binary = '';
-      for (const byte of bytes) binary += String.fromCharCode(byte);
-
-      socketRef.current.send(JSON.stringify({
-        type: 'FILE_CHUNK',
-        payload: { relativePath, offset, data: btoa(binary) }
-      }));
+      socketRef.current.send(encodeBinaryChunk(relativePath, offset, buffer));
     } catch (error) {
       alert(`Failed to read ${relativePath}: ${error.message}`);
     }
