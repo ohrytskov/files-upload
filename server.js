@@ -62,7 +62,16 @@ if (fs.existsSync(DIST_DIR)) {
   console.warn(`[Server] ${DIST_DIR} is missing; run "npm run build" before starting the web UI.`);
   app.use(express.static(DIST_DIR));
 }
-app.use('/uploads', express.static(UPLOADS_DIR));
+app.use('/uploads', (req, res, next) => {
+  let relativePath;
+  try {
+    relativePath = decodeURIComponent(req.path).replace(/^\/+/, '');
+    resolveSafePath(UPLOADS_DIR, relativePath);
+    next();
+  } catch (err) {
+    res.status(400).json({ error: 'Invalid upload path' });
+  }
+}, express.static(UPLOADS_DIR));
 
 const auth = createAuthMiddleware(AUTH_TOKEN);
 app.use('/api', auth.middleware);
@@ -99,6 +108,22 @@ function isInternalUploadFile(filename) {
   return filename === 'server_state.json' || filename === 'server_state.json.tmp';
 }
 
+function resolveHashScanPath(sourcePath) {
+  const root = path.resolve(HASH_SCAN_ROOT);
+  const requested = sourcePath.trim().replace(/\\/g, '/');
+  const candidate = path.isAbsolute(sourcePath)
+    ? path.resolve(sourcePath)
+    : path.resolve(root, requested);
+
+  if (candidate === root) {
+    const rootStat = fs.lstatSync(root);
+    if (rootStat.isSymbolicLink()) throw new Error('Hash scan root cannot be a symbolic link');
+    return { normalized: '.', resolved: root };
+  }
+
+  return resolveSafePath(root, path.relative(root, candidate));
+}
+
 function getCachedServerMd5(filePath, stats) {
   const cacheKey = path.resolve(filePath);
   const cached = md5Cache.get(cacheKey);
@@ -132,7 +157,8 @@ app.get('/api/files', async (req, res) => {
       if (isInternalUploadFile(file)) continue;
       const filePath = path.join(UPLOADS_DIR, file);
       try {
-        const stats = fs.statSync(filePath);
+        const stats = fs.lstatSync(filePath);
+        if (stats.isSymbolicLink()) continue;
         if (!stats.isFile()) continue;
 
         const serverMd5 = await getCachedServerMd5(filePath, stats);
@@ -203,7 +229,8 @@ app.get('/api/stats', (req, res) => {
       if (isInternalUploadFile(file)) return;
       const filePath = path.join(UPLOADS_DIR, file);
       try {
-        const stats = fs.statSync(filePath);
+        const stats = fs.lstatSync(filePath);
+        if (stats.isSymbolicLink()) return;
         if (stats.isFile()) {
           totalFiles += 1;
           const cat = getFileCategory(file);
@@ -290,9 +317,7 @@ app.post('/api/hash/scan', uploadRateLimit, async (req, res) => {
   }
 
   try {
-    const source = resolveSafePath(HASH_SCAN_ROOT, path.isAbsolute(sourcePath)
-      ? path.relative(HASH_SCAN_ROOT, sourcePath)
-      : sourcePath);
+    const source = resolveHashScanPath(sourcePath);
     const safeOutputFile = outputFile
       ? resolveSafePath(HASH_SCAN_ROOT, outputFile).resolved
       : null;
