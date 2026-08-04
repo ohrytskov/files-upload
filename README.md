@@ -1,13 +1,13 @@
-# CloudVault — Stateful WebSocket MD5 File Upload & Hash Audit Repository
+# CloudVault — Stateful WebSocket File Upload & Hash Audit Repository
 
-A high-performance, resilient file upload and MD5 checksum verification repository built with **Node.js**, **Express**, **WebSockets (`ws`)**, and **Vanilla JavaScript**.
+A high-performance, resilient file upload and checksum verification repository built with **Node.js**, **Express**, **WebSockets (`ws`)**, and **React + Vite**.
 
 ---
 
 ## 🌟 Key Features
 
-1. **MD5 Hash Generator (`lib/hash-generator.js`)**:
-   - Streams MD5 calculation using Node `crypto` module (Memory-efficient for gigabyte+ files).
+1. **Configurable Hash Generator (`lib/hash-generator.js`)**:
+   - Streams MD5 or SHA-256 calculation using Node `crypto` (memory-efficient for gigabyte+ files).
    - Supports **Windows 11 paths** (e.g., `D:\marriage`, `C:\Users\...`) and **Linux paths**.
    - Normalizes path slashes (`\` to `/`) for cross-platform checksum alignment.
 
@@ -19,14 +19,19 @@ A high-performance, resilient file upload and MD5 checksum verification reposito
    - Live speed (MB/s), Estimated Time Remaining (ETA), uploaded files count, and byte totals.
    - Individual file chunk progress bars & overall batch completion gauge.
 
-4. **Server-side MD5 Verification & Comparison Audit**:
-   - Computes server-side MD5 checksum upon file completion.
-   - Compares client vs server MD5 hashes to guarantee 100% data integrity.
+4. **Server-side Hash Verification & Comparison Audit**:
+   - Computes the selected server-side hash upon file completion.
+   - Compares client vs server hashes to guarantee data integrity; MD5 remains the default for compatibility and SHA-256 is available when stronger collision resistance is required.
    - Generates full verification audit reports.
 
 5. **2-Module Architecture (Client & Server)**:
    - **Server Module** (`server.js`, `lib/ws-server.js`): Express + WebSocket server handling chunk writes, hash verification, state sync, and REST endpoints.
-   - **Client Module** (`bin/upload-cli.js`, `lib/ws-client.js`, `public/ws-uploader-ui.js`): CLI tool and interactive Web Dashboard.
+   - **Client Module** (`bin/upload-cli.js`, `lib/ws-client.js`, `src/components/WebSocketUploader.jsx`): CLI tool and interactive React dashboard.
+
+6. **Security and Transport Controls**:
+   - Optional bearer-token authentication for API and WebSocket control traffic via `CLOUDVAULT_AUTH_TOKEN`.
+   - Request and WebSocket connection rate limits can be tuned with environment variables.
+   - Upload chunks use binary WebSocket frames instead of base64-encoded JSON payloads.
 
 ---
 
@@ -35,16 +40,22 @@ A high-performance, resilient file upload and MD5 checksum verification reposito
 ### 1. Install & Start Server
 ```bash
 npm install
+npm run build
 npm start
 ```
 Server runs on:
 - Web Interface: `http://localhost:3000`
 - WebSocket Upload Endpoint: `ws://localhost:3000/ws/upload`
 
+To enable authentication, set `CLOUDVAULT_AUTH_TOKEN` before starting the server. Enter the same token in the dashboard API token field or pass it to the CLI with `--token`.
+
 ### 2. Run Stateful Batch Upload via CLI
 ```bash
 # Upload a Windows 11 path to local or remote WebSocket server:
 node bin/upload-cli.js -p "D:\marriage" -s "ws://localhost:3000/ws/upload"
+
+# Use SHA-256 and an authenticated server:
+node bin/upload-cli.js -p "/data/to-upload" --algorithm sha256 --token "$CLOUDVAULT_AUTH_TOKEN"
 
 # Generate hashes.txt manifest during upload:
 node bin/upload-cli.js -p "/var/www/hello/my/files-area" -o "hashes.txt"
@@ -53,8 +64,8 @@ node bin/upload-cli.js -p "/var/www/hello/my/files-area" -o "hashes.txt"
 ### 3. Interactive Web UI
 Open `http://localhost:3000` in your browser to access:
 - **File Repository**: View, preview, search, download, rename, or delete uploaded files with MD5 tags.
-- **WebSocket Batch Uploader**: Scan target local paths, watch real-time speeds & progress bars, pause/resume transfers.
-- **MD5 Audit Report**: View side-by-side Client MD5 vs Server Computed MD5 verification status.
+- **WebSocket Batch Uploader**: Select local files/directories, choose MD5 or SHA-256, watch real-time speeds and progress bars, and pause/resume transfers.
+- **Hash Audit Report**: View side-by-side client and server MD5 verification status for repository files.
 
 ---
 
@@ -68,6 +79,8 @@ Options:
   -s, --server <url>     WebSocket server URL (default: ws://localhost:3000/ws/upload)
   -o, --output <file>    Path to save standard hashes.txt manifest
   --state <file>         State JSON path (default: state.json for resuming)
+  --token <token>        Bearer token when authentication is enabled
+  --algorithm <name>     Hash algorithm: md5 (default) or sha256
 ```
 
 ---
@@ -79,15 +92,15 @@ files-upload/
 ├── bin/
 │   └── upload-cli.js       # Command line batch uploader tool
 ├── lib/
-│   ├── hash-generator.js   # MD5 streaming hash generator (Windows & Linux)
+│   ├── hash-generator.js   # MD5/SHA-256 streaming hash generator
+│   ├── chunk-protocol.js   # Binary WebSocket chunk framing
+│   ├── path-utils.js       # Upload path containment checks
+│   ├── security.js         # Token auth and rate limiting
 │   ├── state-manager.js    # Persistent state.json manager for interruption recovery
 │   ├── ws-client.js        # Client WebSocket chunked uploader engine
-│   └── ws-server.js        # Server WebSocket upload handler & MD5 verification
-├── public/
-│   ├── index.html          # Web UI layout with tabs
-│   ├── style.css           # Modern dark UI theme with state chips & dashboards
-│   ├── app.js              # Repository manager script
-│   └── ws-uploader-ui.js   # Browser WebSocket uploader & audit interface
+│   └── ws-server.js        # Server WebSocket upload handler & hash verification
+├── src/                    # React UI source
+├── dist/                   # Production UI generated by npm run build
 ├── uploads/                # Target upload directory
 ├── package.json
 └── server.js               # Express + WebSocket main server
