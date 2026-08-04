@@ -188,6 +188,7 @@ app.get('/api/stats', (req, res) => {
     }
 
     let totalSize = 0;
+    let totalFiles = 0;
     const categories = {
       image: { count: 0, size: 0 },
       document: { count: 0, size: 0 },
@@ -204,6 +205,7 @@ app.get('/api/stats', (req, res) => {
       try {
         const stats = fs.statSync(filePath);
         if (stats.isFile()) {
+          totalFiles += 1;
           const cat = getFileCategory(file);
           totalSize += stats.size;
           if (categories[cat]) {
@@ -215,7 +217,7 @@ app.get('/api/stats', (req, res) => {
     });
 
     res.json({
-      totalFiles: files.length,
+      totalFiles,
       totalSize,
       categories
     });
