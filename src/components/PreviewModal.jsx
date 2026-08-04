@@ -1,7 +1,53 @@
-import React from 'react';
-import { X, Download, FileText, Image as ImageIcon, Music, Video, Code, File } from 'lucide-react';
+import React, { useEffect, useState } from 'react';
+import { X, Download, File } from 'lucide-react';
+import { apiFetch } from '../utils/api';
+
+const TEXT_PREVIEW_MAX_BYTES = 2 * 1024 * 1024;
+const TEXT_EXTENSIONS = new Set([
+  '.txt', '.md', '.csv', '.log', '.xml', '.yaml', '.yml', '.ini', '.conf',
+  '.js', '.jsx', '.ts', '.tsx', '.json', '.html', '.css', '.py', '.java',
+  '.cpp', '.c', '.sh', '.php'
+]);
+
+function isTextFile(file) {
+  const extension = (file.extension || '').toLowerCase();
+  return file.category === 'code' || TEXT_EXTENSIONS.has(extension);
+}
 
 export default function PreviewModal({ file, onClose }) {
+  const [textContent, setTextContent] = useState('');
+  const [textState, setTextState] = useState('idle');
+
+  useEffect(() => {
+    let cancelled = false;
+    setTextContent('');
+    setTextState('idle');
+
+    if (!file || !isTextFile(file)) return () => { cancelled = true; };
+    if (file.size > TEXT_PREVIEW_MAX_BYTES) {
+      setTextState('too-large');
+      return () => { cancelled = true; };
+    }
+
+    setTextState('loading');
+    apiFetch(file.url)
+      .then(response => {
+        if (!response.ok) throw new Error('Unable to load file');
+        return response.text();
+      })
+      .then(content => {
+        if (!cancelled) {
+          setTextContent(content);
+          setTextState('ready');
+        }
+      })
+      .catch(() => {
+        if (!cancelled) setTextState('error');
+      });
+
+    return () => { cancelled = true; };
+  }, [file]);
+
   if (!file) return null;
 
   const formatBytes = (bytes) => {
@@ -37,6 +83,13 @@ export default function PreviewModal({ file, onClose }) {
             <audio controls src={file.url} style={{ width: '100%', marginTop: '20px' }}></audio>
           ) : file.category === 'video' ? (
             <video controls src={file.url} style={{ maxWidth: '100%', maxHeight: '50vh' }}></video>
+          ) : isTextFile(file) ? (
+            <div>
+              {textState === 'loading' && <p style={{ color: '#94a3b8' }}>Loading preview...</p>}
+              {textState === 'too-large' && <p style={{ color: '#fbbf24' }}>This text file is larger than the 2 MB preview limit.</p>}
+              {textState === 'error' && <p style={{ color: '#f87171' }}>Unable to load this text preview.</p>}
+              {textState === 'ready' && <pre className="text-preview">{textContent}</pre>}
+            </div>
           ) : (
             <div style={{ padding: '40px 0', color: '#94a3b8' }}>
               <File size={64} color="#6366f1" style={{ margin: '0 auto 16px', display: 'block' }} />

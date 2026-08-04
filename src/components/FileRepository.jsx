@@ -161,6 +161,10 @@ export default function FileRepository({ files, onRefresh, onPreview, onRename, 
                 className="file-action-btn"
                 title="Copy Link"
                 onClick={() => {
+                  if (!navigator.clipboard) {
+                    onNotify?.('Clipboard access is unavailable', 'error');
+                    return;
+                  }
                   navigator.clipboard.writeText(window.location.origin + file.url)
                     .then(() => onNotify?.('Link copied!'))
                     .catch(() => onNotify?.('Could not copy link', 'error'));

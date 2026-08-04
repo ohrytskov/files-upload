@@ -93,7 +93,7 @@ export default function WebSocketUploader({ onAuditTrigger, authToken, onNotify 
       setSessionStatus('Files Hashed & Ready');
       setStats(prev => ({ ...prev, totalFiles: data.totalFiles, totalBytes: data.totalBytes }));
     } catch (error) {
-      alert(error.message || 'Failed to read selected files');
+      onNotify?.(error.message || 'Failed to read selected files', 'error');
     } finally {
       setIsScanning(false);
     }
@@ -303,7 +303,7 @@ export default function WebSocketUploader({ onAuditTrigger, authToken, onNotify 
 
       socketRef.current.send(encodeBinaryChunk(relativePath, offset, buffer));
     } catch (error) {
-      alert(`Failed to read ${relativePath}: ${error.message}`);
+      onNotify?.(`Failed to read ${relativePath}: ${error.message}`, 'error');
     }
   };
 
