@@ -86,3 +86,12 @@ export function md5ArrayBuffer(arrayBuffer) {
 
   return `${wordToHex(a0)}${wordToHex(b0)}${wordToHex(c0)}${wordToHex(d0)}`;
 }
+
+export async function hashArrayBuffer(arrayBuffer, algorithm = 'md5') {
+  const normalized = algorithm.toLowerCase();
+  if (normalized === 'md5') return md5ArrayBuffer(arrayBuffer);
+  if (normalized !== 'sha256') throw new Error(`Unsupported hash algorithm: ${algorithm}`);
+
+  const digest = await window.crypto.subtle.digest('SHA-256', arrayBuffer);
+  return Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, '0')).join('');
+}

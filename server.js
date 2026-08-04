@@ -280,9 +280,9 @@ app.patch('/api/files/:filename', mutationRateLimit, (req, res) => {
   });
 });
 
-// 6. MD5 Scanner REST Endpoint
+// 6. Hash Scanner REST Endpoint
 app.post('/api/hash/scan', uploadRateLimit, async (req, res) => {
-  const { sourcePath, outputFile } = req.body;
+  const { sourcePath, outputFile, algorithm = 'md5' } = req.body;
   if (!sourcePath) {
     return res.status(400).json({ error: 'sourcePath is required' });
   }
@@ -294,7 +294,7 @@ app.post('/api/hash/scan', uploadRateLimit, async (req, res) => {
     const safeOutputFile = outputFile
       ? resolveSafePath(HASH_SCAN_ROOT, outputFile).resolved
       : null;
-    const result = await generateHashes({ sourcePath: source.resolved, outputFile: safeOutputFile });
+    const result = await generateHashes({ sourcePath: source.resolved, outputFile: safeOutputFile, algorithm });
     res.json(result);
   } catch (err) {
     res.status(403).json({ error: 'Hash scans are restricted to the configured scan directory' });

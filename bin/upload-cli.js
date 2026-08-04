@@ -10,7 +10,8 @@ function parseArgs() {
     serverUrl: 'ws://localhost:3000/ws/upload',
     stateFilePath: 'state.json',
     outputHashesFile: null,
-    authToken: process.env.CLOUDVAULT_AUTH_TOKEN || ''
+    authToken: process.env.CLOUDVAULT_AUTH_TOKEN || '',
+    hashAlgorithm: 'md5'
   };
 
   for (let i = 0; i < args.length; i++) {
@@ -25,6 +26,8 @@ function parseArgs() {
       options.outputHashesFile = args[++i];
     } else if (arg === '--token') {
       options.authToken = args[++i];
+    } else if (arg === '--algorithm') {
+      options.hashAlgorithm = args[++i];
     }
   }
 
@@ -49,6 +52,7 @@ Options:
   -o, --output <file>    Optional path to save standard hashes.txt manifest
   --state <file>         Persistent state JSON path (default: state.json for resuming)
   --token <token>        Bearer token when server authentication is enabled
+  --algorithm <name>     Hash algorithm: md5 (default) or sha256
 
 Examples:
   node bin/upload-cli.js -p "D:\\marriage" -s "ws://my-remote-server.com:3000/ws/upload"
@@ -62,9 +66,10 @@ Examples:
     sourcePath: options.sourcePath,
     stateFilePath: options.stateFilePath,
     authToken: options.authToken,
+    hashAlgorithm: options.hashAlgorithm,
     onProgress: (p) => {
       if (p.stage === 'hashing') {
-        process.stdout.write(`\r🔍 Generating MD5 [${p.current}/${p.total}]: ${p.file.slice(0, 40)}`);
+        process.stdout.write(`\r🔍 Generating ${options.hashAlgorithm.toUpperCase()} [${p.current}/${p.total}]: ${p.file.slice(0, 40)}`);
       } else if (p.stage === 'uploading') {
         const speedMB = (p.speedBps / (1024 * 1024)).toFixed(2);
         const uploadedMB = (p.uploadedBytes / (1024 * 1024)).toFixed(2);
@@ -78,7 +83,7 @@ Examples:
     },
     onFileStatus: (status) => {
       if (status.status === 'verified') {
-        console.log(`\n  ✅ Verified MD5: ${status.relativePath} -> ${status.serverMd5}`);
+        console.log(`\n  ✅ Verified hash: ${status.relativePath} -> ${status.serverHash || status.serverMd5}`);
       } else if (status.status === 'failed') {
         console.log(`\n  ❌ Upload Failed: ${status.relativePath} -> ${status.error}`);
       }

@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { Play, Pause, CheckCircle2, AlertCircle } from 'lucide-react';
-import { md5ArrayBuffer } from '../utils/md5';
+import { hashArrayBuffer } from '../utils/md5';
 
 const CHUNK_SIZE = 256 * 1024;
 
@@ -21,6 +21,7 @@ function encodeBinaryChunk(relativePath, offset, arrayBuffer) {
 
 export default function WebSocketUploader({ onAuditTrigger, authToken, onNotify }) {
   const [serverUrl, setServerUrl] = useState(`${window.location.protocol === 'https:' ? 'wss' : 'ws'}://${window.location.host}/ws/upload`);
+  const [hashAlgorithm, setHashAlgorithm] = useState('md5');
   const [manifest, setManifest] = useState(null);
   const [isScanning, setIsScanning] = useState(false);
   const [isUploading, setIsUploading] = useState(false);
@@ -71,7 +72,8 @@ export default function WebSocketUploader({ onAuditTrigger, authToken, onNotify 
           file,
           relativePath,
           size: file.size,
-          md5: md5ArrayBuffer(await file.arrayBuffer()),
+          hashAlgorithm,
+          hash: await hashArrayBuffer(await file.arrayBuffer(), hashAlgorithm),
           status: 'pending',
           offset: 0,
           serverMd5: null
@@ -81,6 +83,7 @@ export default function WebSocketUploader({ onAuditTrigger, authToken, onNotify 
 
       const data = {
         sourcePath: 'browser-selection',
+        hashAlgorithm,
         totalFiles: files.length,
         totalBytes,
         files
@@ -158,8 +161,11 @@ export default function WebSocketUploader({ onAuditTrigger, authToken, onNotify 
           const sf = serverFiles[f.relativePath];
           return {
             ...f,
+            hashAlgorithm: sf ? sf.hashAlgorithm || f.hashAlgorithm : f.hashAlgorithm,
+            hash: sf ? sf.hash || f.hash : f.hash,
             offset: sf ? sf.offset || 0 : 0,
             status: sf ? sf.status || 'pending' : 'pending',
+            serverHash: sf ? sf.serverHash || sf.serverMd5 : null,
             serverMd5: sf ? sf.serverMd5 : null
           };
         })
@@ -194,7 +200,12 @@ export default function WebSocketUploader({ onAuditTrigger, authToken, onNotify 
       if (file && offset >= file.size) {
         socketRef.current?.send(JSON.stringify({
           type: 'FINISH_FILE',
-          payload: { relativePath, clientMd5: file.md5 }
+          payload: {
+            relativePath,
+            hashAlgorithm: file.hashAlgorithm,
+            clientHash: file.hash,
+            ...(file.hashAlgorithm === 'md5' ? { clientMd5: file.hash } : {})
+          }
         }));
       } else {
         sendChunk(relativePath, offset);
@@ -202,7 +213,13 @@ export default function WebSocketUploader({ onAuditTrigger, authToken, onNotify 
     } else if (type === 'FILE_VERIFIED') {
       const updated = {
         ...manifestRef.current,
-        files: manifestRef.current.files.map(f => f.relativePath === payload.relativePath ? { ...f, status: 'verified', serverMd5: payload.serverMd5, match: true } : f)
+        files: manifestRef.current.files.map(f => f.relativePath === payload.relativePath ? {
+          ...f,
+          status: 'verified',
+          serverHash: payload.serverHash || payload.serverMd5,
+          serverMd5: payload.serverMd5,
+          match: true
+        } : f)
       };
       manifestRef.current = updated;
       setManifest(updated);
@@ -210,7 +227,13 @@ export default function WebSocketUploader({ onAuditTrigger, authToken, onNotify 
     } else if (type === 'FILE_ERROR') {
       const updated = {
         ...manifestRef.current,
-        files: manifestRef.current.files.map(f => f.relativePath === payload.relativePath ? { ...f, status: 'failed', serverMd5: payload.serverMd5 || null, match: false } : f)
+        files: manifestRef.current.files.map(f => f.relativePath === payload.relativePath ? {
+          ...f,
+          status: 'failed',
+          serverHash: payload.serverHash || payload.serverMd5 || null,
+          serverMd5: payload.serverMd5 || null,
+          match: false
+        } : f)
       };
       manifestRef.current = updated;
       setManifest(updated);
@@ -231,7 +254,7 @@ export default function WebSocketUploader({ onAuditTrigger, authToken, onNotify 
     const pending = currentManifest.files.find(f => f.status === 'pending' || f.status === 'uploading');
 
     if (!pending) {
-      setSessionStatus('Running MD5 Server Audit...');
+      setSessionStatus('Running Server Hash Audit...');
       socketRef.current.send(JSON.stringify({ type: 'RUN_FULL_AUDIT' }));
       return;
     }
@@ -247,7 +270,9 @@ export default function WebSocketUploader({ onAuditTrigger, authToken, onNotify 
       payload: {
         relativePath: pending.relativePath,
         size: pending.size,
-        clientMd5: pending.md5,
+        hashAlgorithm: pending.hashAlgorithm,
+        clientHash: pending.hash,
+        ...(pending.hashAlgorithm === 'md5' ? { clientMd5: pending.hash } : {}),
         offset: pending.offset || 0
       }
     }));
@@ -263,7 +288,12 @@ export default function WebSocketUploader({ onAuditTrigger, authToken, onNotify 
       if (end <= offset) {
         socketRef.current.send(JSON.stringify({
           type: 'FINISH_FILE',
-          payload: { relativePath, clientMd5: fileItem.md5 }
+          payload: {
+            relativePath,
+            hashAlgorithm: fileItem.hashAlgorithm,
+            clientHash: fileItem.hash,
+            ...(fileItem.hashAlgorithm === 'md5' ? { clientMd5: fileItem.hash } : {})
+          }
         }));
         return;
       }
@@ -353,11 +383,24 @@ export default function WebSocketUploader({ onAuditTrigger, authToken, onNotify 
               placeholder="ws://localhost:3000/ws/upload"
             />
           </div>
+
+          <div className="form-group">
+            <label>Hash algorithm:</label>
+            <select
+              className="text-input"
+              value={hashAlgorithm}
+              onChange={(event) => setHashAlgorithm(event.target.value)}
+              disabled={isScanning || isUploading}
+            >
+              <option value="md5">MD5 (legacy compatible)</option>
+              <option value="sha256">SHA-256</option>
+            </select>
+          </div>
         </div>
 
         <div style={{ display: 'flex', gap: '12px', marginTop: '8px' }}>
           <span className="status-chip neutral">
-            {isScanning ? 'Hashing selected files...' : 'Select files above to generate hashes'}
+            {isScanning ? `Hashing selected files with ${hashAlgorithm.toUpperCase()}...` : 'Select files above to generate hashes'}
           </span>
           <button className="btn btn-primary" onClick={startUpload} disabled={!manifest || isUploading && !isPaused}>
             <Play size={16} /> {isPaused ? 'Resume Upload' : 'Start / Resume Stateful Upload'}
@@ -421,15 +464,15 @@ export default function WebSocketUploader({ onAuditTrigger, authToken, onNotify 
       </div>
 
       <div className="card">
-        <h3>File Batch Queue & Server MD5 Status</h3>
+        <h3>File Batch Queue & Server Hash Status</h3>
         <div style={{ overflowX: 'auto' }}>
           <table className="data-table">
             <thead>
               <tr>
                 <th>Relative Path</th>
                 <th>Size</th>
-                <th>Client MD5</th>
-                <th>Server MD5</th>
+                <th>Client Hash</th>
+                <th>Server Hash</th>
                 <th>Status</th>
                 <th>Match</th>
               </tr>
@@ -439,8 +482,8 @@ export default function WebSocketUploader({ onAuditTrigger, authToken, onNotify 
                 <tr key={f.relativePath}>
                   <td><strong>{f.relativePath}</strong></td>
                   <td>{formatBytes(f.size)}</td>
-                  <td><code>{f.md5 ? f.md5.slice(0, 10) + '...' : 'N/A'}</code></td>
-                  <td><code>{f.serverMd5 ? f.serverMd5.slice(0, 10) + '...' : '--'}</code></td>
+                  <td><code>{f.hash ? f.hash.slice(0, 10) + '...' : 'N/A'}</code></td>
+                  <td><code>{(f.serverHash || f.serverMd5) ? (f.serverHash || f.serverMd5).slice(0, 10) + '...' : '--'}</code></td>
                   <td>
                     <span className={`status-chip ${f.status === 'verified' ? 'success' : f.status === 'uploading' ? 'warning' : f.status === 'failed' ? 'danger' : 'neutral'}`}>
                       {f.status}
