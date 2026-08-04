@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { Search, Grid, List, UploadCloud, Link as LinkIcon, Edit2, Download, Trash2, FileText, Image as ImageIcon, Code, Music, Video, Archive, File } from 'lucide-react';
 
-export default function FileRepository({ files, onRefresh, onPreview, onRename, onDelete, onUploadFiles }) {
+export default function FileRepository({ files, onRefresh, onPreview, onRename, onDelete, onUploadFiles, onNotify }) {
   const [search, setSearch] = useState('');
   const [sort, setSort] = useState('date-desc');
   const [viewMode, setViewMode] = useState('grid');
@@ -161,8 +161,9 @@ export default function FileRepository({ files, onRefresh, onPreview, onRename, 
                 className="file-action-btn"
                 title="Copy Link"
                 onClick={() => {
-                  navigator.clipboard.writeText(window.location.origin + file.url);
-                  alert('Link copied!');
+                  navigator.clipboard.writeText(window.location.origin + file.url)
+                    .then(() => onNotify?.('Link copied!'))
+                    .catch(() => onNotify?.('Could not copy link', 'error'));
                 }}
               >
                 <LinkIcon size={16} />

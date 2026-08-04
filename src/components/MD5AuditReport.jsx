@@ -1,14 +1,15 @@
 import React, { useState, useEffect } from 'react';
 import { ShieldCheck, CheckCircle2, AlertCircle, FileWarning, RefreshCw } from 'lucide-react';
+import { apiFetch } from '../utils/api';
 
-export default function MD5AuditReport() {
+export default function MD5AuditReport({ onNotify }) {
   const [auditData, setAuditData] = useState(null);
   const [loading, setLoading] = useState(false);
 
   const runAudit = async () => {
     setLoading(true);
     try {
-      const res = await fetch('/api/files');
+      const res = await apiFetch('/api/files');
       const data = await res.json();
       if (res.ok) {
         const files = data.files || [];
@@ -26,8 +27,10 @@ export default function MD5AuditReport() {
           }))
         });
       }
+      else if (onNotify) onNotify(data.error || 'Audit failed', 'error');
     } catch (err) {
       console.error(err);
+      if (onNotify) onNotify('Audit failed', 'error');
     } finally {
       setLoading(false);
     }

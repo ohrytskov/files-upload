@@ -2,7 +2,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import { Play, Pause, CheckCircle2, AlertCircle } from 'lucide-react';
 import { md5ArrayBuffer } from '../utils/md5';
 
-export default function WebSocketUploader({ onAuditTrigger }) {
+export default function WebSocketUploader({ onAuditTrigger, authToken, onNotify }) {
   const [serverUrl, setServerUrl] = useState(`${window.location.protocol === 'https:' ? 'wss' : 'ws'}://${window.location.host}/ws/upload`);
   const [manifest, setManifest] = useState(null);
   const [isScanning, setIsScanning] = useState(false);
@@ -100,7 +100,7 @@ export default function WebSocketUploader({ onAuditTrigger }) {
       transferredBytesRef.current = 0;
       setSessionStatus('Uploading...');
 
-      ws.send(JSON.stringify({
+      const initializeSession = () => ws.send(JSON.stringify({
         type: 'INIT_SESSION',
         payload: {
           sessionId: `session_${Date.now()}`,
@@ -108,6 +108,12 @@ export default function WebSocketUploader({ onAuditTrigger }) {
           files: manifestRef.current.files.map(({ file, ...fileItem }) => fileItem)
         }
       }));
+
+      if (authToken) {
+        ws.send(JSON.stringify({ type: 'AUTH', payload: { token: authToken } }));
+      } else {
+        initializeSession();
+      }
     };
 
     ws.onmessage = (e) => {
@@ -144,6 +150,19 @@ export default function WebSocketUploader({ onAuditTrigger }) {
       manifestRef.current = updated;
       setManifest(updated);
       uploadNextFile();
+    } else if (type === 'AUTH_OK') {
+      socketRef.current?.send(JSON.stringify({
+        type: 'INIT_SESSION',
+        payload: {
+          sessionId: `session_${Date.now()}`,
+          sourcePath: 'browser-selection',
+          files: manifestRef.current?.files.map(({ file, ...fileItem }) => fileItem) || []
+        }
+      }));
+    } else if (type === 'ERROR') {
+      setIsUploading(false);
+      setSessionStatus(msg.message || 'Upload error');
+      onNotify?.(msg.message || 'WebSocket upload error', 'error');
     } else if (type === 'FILE_STARTED') {
       sendChunk(payload.relativePath, payload.offset);
     } else if (type === 'CHUNK_ACK') {
@@ -178,6 +197,7 @@ export default function WebSocketUploader({ onAuditTrigger }) {
       };
       manifestRef.current = updated;
       setManifest(updated);
+      onNotify?.(payload.error || `Upload failed for ${payload.relativePath}`, 'error');
       uploadNextFile();
     } else if (type === 'AUDIT_COMPLETE') {
       setIsUploading(false);

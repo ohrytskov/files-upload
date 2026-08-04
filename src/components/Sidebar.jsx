@@ -1,7 +1,7 @@
 import React from 'react';
-import { Folder, UploadCloud, ShieldCheck, Cloud } from 'lucide-react';
+import { Folder, UploadCloud, ShieldCheck, Cloud, KeyRound } from 'lucide-react';
 
-export default function Sidebar({ activeTab, setActiveTab, stats }) {
+export default function Sidebar({ activeTab, setActiveTab, stats, authToken, onAuthTokenChange }) {
   const usedMB = stats ? (stats.totalSize / (1024 * 1024)).toFixed(2) : 0;
   const maxMB = 100;
   const pct = Math.min(100, Math.round((usedMB / maxMB) * 100));
@@ -53,6 +53,16 @@ export default function Sidebar({ activeTab, setActiveTab, stats }) {
           <span>{usedMB} MB used</span>
           <span>100 MB Limit</span>
         </div>
+        <label className="auth-token-field">
+          <span><KeyRound size={14} /> API token</span>
+          <input
+            type="password"
+            value={authToken}
+            onChange={(event) => onAuthTokenChange(event.target.value)}
+            placeholder="Optional"
+            autoComplete="off"
+          />
+        </label>
       </div>
     </aside>
   );

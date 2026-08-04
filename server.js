@@ -7,12 +7,14 @@ const multer = require('multer');
 const { initWebSocketServer, calculateServerMd5 } = require('./lib/ws-server');
 const { generateHashes } = require('./lib/hash-generator');
 const { normalizeFilename, resolveSafePath } = require('./lib/path-utils');
+const { createAuthMiddleware, createRateLimiter, normalizeToken } = require('./lib/security');
 const StateManager = require('./lib/state-manager');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 const UPLOADS_DIR = path.join(__dirname, 'uploads');
 const HASH_SCAN_ROOT = path.resolve(process.env.HASH_SCAN_ROOT || UPLOADS_DIR);
+const AUTH_TOKEN = normalizeToken(process.env.CLOUDVAULT_AUTH_TOKEN || process.env.AUTH_TOKEN);
 const md5Cache = new Map();
 
 // Ensure uploads directory exists
@@ -52,14 +54,27 @@ const upload = multer({
   limits: { fileSize: 100 * 1024 * 1024 } // 100 MB max limit
 });
 
-app.use(express.json());
+app.use(express.json({ limit: '10mb' }));
 const DIST_DIR = path.join(__dirname, 'dist');
 if (fs.existsSync(DIST_DIR)) {
   app.use(express.static(DIST_DIR));
 } else {
-  app.use(express.static(path.join(__dirname, 'public')));
+  console.warn(`[Server] ${DIST_DIR} is missing; run "npm run build" before starting the web UI.`);
+  app.use(express.static(DIST_DIR));
 }
 app.use('/uploads', express.static(UPLOADS_DIR));
+
+const auth = createAuthMiddleware(AUTH_TOKEN);
+app.use('/api', auth.middleware);
+
+const uploadRateLimit = createRateLimiter({
+  windowMs: Number(process.env.UPLOAD_RATE_WINDOW_MS) || 60_000,
+  max: Number(process.env.UPLOAD_RATE_MAX) || 20
+});
+const mutationRateLimit = createRateLimiter({
+  windowMs: Number(process.env.API_RATE_WINDOW_MS) || 60_000,
+  max: Number(process.env.API_RATE_MAX) || 120
+});
 
 // File Category Helper
 function getFileCategory(filename) {
@@ -81,7 +96,7 @@ function getFileCategory(filename) {
 }
 
 function isInternalUploadFile(filename) {
-  return filename === 'server_state.json' || filename.endsWith('.tmp');
+  return filename === 'server_state.json' || filename === 'server_state.json.tmp';
 }
 
 function getCachedServerMd5(filePath, stats) {
@@ -143,7 +158,7 @@ app.get('/api/files', async (req, res) => {
 });
 
 // 2. Upload multiple files via standard HTTP
-app.post('/api/upload', upload.array('files', 20), (req, res) => {
+app.post('/api/upload', uploadRateLimit, upload.array('files', 20), (req, res) => {
   if (!req.files || req.files.length === 0) {
     return res.status(400).json({ error: 'No files were uploaded.' });
   }
@@ -184,6 +199,7 @@ app.get('/api/stats', (req, res) => {
     };
 
     files.forEach(file => {
+      if (isInternalUploadFile(file)) return;
       const filePath = path.join(UPLOADS_DIR, file);
       try {
         const stats = fs.statSync(filePath);
@@ -207,7 +223,7 @@ app.get('/api/stats', (req, res) => {
 });
 
 // 4. Delete file
-app.delete('/api/files/:filename', (req, res) => {
+app.delete('/api/files/:filename', mutationRateLimit, (req, res) => {
   const filename = req.params.filename;
   let filePath;
   try {
@@ -230,7 +246,7 @@ app.delete('/api/files/:filename', (req, res) => {
 });
 
 // 5. Rename file
-app.patch('/api/files/:filename', (req, res) => {
+app.patch('/api/files/:filename', mutationRateLimit, (req, res) => {
   const oldName = req.params.filename;
   const { newName } = req.body;
 
@@ -265,7 +281,7 @@ app.patch('/api/files/:filename', (req, res) => {
 });
 
 // 6. MD5 Scanner REST Endpoint
-app.post('/api/hash/scan', async (req, res) => {
+app.post('/api/hash/scan', uploadRateLimit, async (req, res) => {
   const { sourcePath, outputFile } = req.body;
   if (!sourcePath) {
     return res.status(400).json({ error: 'sourcePath is required' });
@@ -300,7 +316,11 @@ app.get('/api/hash/state', (req, res) => {
 
 // Create HTTP Server & Bind WebSockets
 const server = http.createServer(app);
-const { wss, stateManager } = initWebSocketServer(server, UPLOADS_DIR);
+const { wss, stateManager } = initWebSocketServer(server, UPLOADS_DIR, {
+  authToken: AUTH_TOKEN,
+  maxConnectionsPerAddress: Number(process.env.WS_CONNECTION_RATE_MAX) || 20,
+  connectionRateWindowMs: Number(process.env.WS_CONNECTION_RATE_WINDOW_MS) || 60_000
+});
 
 const HOST = process.env.HOST || '0.0.0.0';
 

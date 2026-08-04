@@ -9,7 +9,8 @@ function parseArgs() {
     sourcePath: null,
     serverUrl: 'ws://localhost:3000/ws/upload',
     stateFilePath: 'state.json',
-    outputHashesFile: null
+    outputHashesFile: null,
+    authToken: process.env.CLOUDVAULT_AUTH_TOKEN || ''
   };
 
   for (let i = 0; i < args.length; i++) {
@@ -22,6 +23,8 @@ function parseArgs() {
       options.stateFilePath = args[++i];
     } else if (arg === '--output' || arg === '-o') {
       options.outputHashesFile = args[++i];
+    } else if (arg === '--token') {
+      options.authToken = args[++i];
     }
   }
 
@@ -45,6 +48,7 @@ Options:
   -s, --server <url>     Remote/Local WebSocket server URL (default: ws://localhost:3000/ws/upload)
   -o, --output <file>    Optional path to save standard hashes.txt manifest
   --state <file>         Persistent state JSON path (default: state.json for resuming)
+  --token <token>        Bearer token when server authentication is enabled
 
 Examples:
   node bin/upload-cli.js -p "D:\\marriage" -s "ws://my-remote-server.com:3000/ws/upload"
@@ -57,6 +61,7 @@ Examples:
     serverUrl: options.serverUrl,
     sourcePath: options.sourcePath,
     stateFilePath: options.stateFilePath,
+    authToken: options.authToken,
     onProgress: (p) => {
       if (p.stage === 'hashing') {
         process.stdout.write(`\r🔍 Generating MD5 [${p.current}/${p.total}]: ${p.file.slice(0, 40)}`);
