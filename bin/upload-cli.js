@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 const path = require('path');
+const config = require('../lib/config');
 const WebSocketUploaderClient = require('../lib/ws-client');
 
 function parseArgs() {
@@ -8,10 +9,10 @@ function parseArgs() {
   const options = {
     sourcePath: null,
     serverUrl: 'ws://localhost:3000/ws/upload',
-    stateFilePath: 'state.json',
+    stateFilePath: config.defaultStateFile,
     outputHashesFile: null,
-    authToken: process.env.CLOUDVAULT_AUTH_TOKEN || '',
-    hashAlgorithm: 'md5'
+    authToken: config.authToken,
+    hashAlgorithm: config.defaultHashAlgorithm
   };
 
   for (let i = 0; i < args.length; i++) {
@@ -40,7 +41,7 @@ async function main() {
   if (!options.sourcePath) {
     console.log(`
 ==================================================
- 🛠️ WebSocket MD5 Batch Uploader CLI
+ 🛠️ WebSocket Batch Uploader CLI
 ==================================================
 
 Usage:
@@ -52,7 +53,7 @@ Options:
   -o, --output <file>    Optional path to save standard hashes.txt manifest
   --state <file>         Persistent state JSON path (default: state.json for resuming)
   --token <token>        Bearer token when server authentication is enabled
-  --algorithm <name>     Hash algorithm: md5 (default) or sha256
+  --algorithm <name>     Hash algorithm: sha256 (default) or md5
 
 Examples:
   node bin/upload-cli.js -p "D:\\marriage" -s "ws://my-remote-server.com:3000/ws/upload"
@@ -98,9 +99,13 @@ Examples:
       console.log('==================================================\n');
       process.exit(0);
     },
-    onError: (err) => {
+    onError: (err, details = {}) => {
+      if (details.recoverable) {
+        console.error('\n⚠️ Temporary connection issue:', err.message);
+        return;
+      }
       console.error('\n❌ Fatal Error:', err.message);
-      process.exit(1);
+      process.exitCode = 1;
     }
   });
 

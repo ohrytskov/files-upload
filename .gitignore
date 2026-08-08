@@ -2,3 +2,7 @@ node_modules/
 state.json
 *.tmp
 uploads/server_state.json
+uploads/cloudvault.sqlite*
+.env
+.env.*
+!.env.example

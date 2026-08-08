@@ -4,18 +4,32 @@ const path = require('path');
 const express = require('express');
 const multer = require('multer');
 
-const { initWebSocketServer, calculateServerMd5 } = require('./lib/ws-server');
-const { generateHashes } = require('./lib/hash-generator');
-const { normalizeFilename, resolveSafePath } = require('./lib/path-utils');
+const config = require('./lib/config');
+const { initWebSocketServer, calculateServerHash, calculateServerMd5 } = require('./lib/ws-server');
+const { generateHashes, normalizeHashAlgorithm } = require('./lib/hash-generator');
+const { isInternalUploadFile, normalizeFilename, normalizeRelativePath, resolveSafePath } = require('./lib/path-utils');
 const { createAuthMiddleware, createRateLimiter, normalizeToken } = require('./lib/security');
-const StateManager = require('./lib/state-manager');
 
 const app = express();
-const PORT = process.env.PORT || 3000;
-const UPLOADS_DIR = path.join(__dirname, 'uploads');
-const HASH_SCAN_ROOT = path.resolve(process.env.HASH_SCAN_ROOT || UPLOADS_DIR);
-const AUTH_TOKEN = normalizeToken(process.env.CLOUDVAULT_AUTH_TOKEN || process.env.AUTH_TOKEN);
+const PORT = config.port;
+const UPLOADS_DIR = config.uploadsDir;
+const HASH_SCAN_ROOT = config.hashScanRoot;
+const AUTH_TOKEN = normalizeToken(config.authToken);
 const md5Cache = new Map();
+let serverStateManager = null;
+let auditPromise = null;
+const PART_SUFFIX = '.cloudvault-part';
+const ACTIVE_UPLOAD_EXTENSIONS = new Set([
+  '.html', '.htm', '.xhtml', '.js', '.mjs', '.cjs', '.css', '.svg', '.xml'
+]);
+
+function isLoopbackHost(host) {
+  return host === '127.0.0.1' || host === '::1' || host === 'localhost';
+}
+
+if (!AUTH_TOKEN && !isLoopbackHost(config.host)) {
+  throw new Error('CLOUDVAULT_AUTH_TOKEN must be configured when HOST is not loopback-only');
+}
 
 // Ensure uploads directory exists
 if (!fs.existsSync(UPLOADS_DIR)) {
@@ -31,6 +45,9 @@ const storage = multer.diskStorage({
     let originalName;
     try {
       originalName = normalizeFilename(path.basename(file.originalname.replace(/\\/g, '/')));
+      if (isInternalUploadFile(originalName)) {
+        return cb(new Error('Reserved upload filename'));
+      }
     } catch (err) {
       return cb(new Error('Invalid upload filename'));
     }
@@ -51,10 +68,31 @@ const storage = multer.diskStorage({
 
 const upload = multer({
   storage: storage,
-  limits: { fileSize: 100 * 1024 * 1024 } // 100 MB max limit
+  limits: {
+    fileSize: config.httpUploadMaxFileSize,
+    files: config.httpUploadMaxFiles
+  }
 });
 
-app.use(express.json({ limit: '10mb' }));
+function cleanupUploadedFiles(files = []) {
+  for (const file of files) {
+    if (!file?.filename) continue;
+    try { fs.unlinkSync(path.join(UPLOADS_DIR, file.filename)); } catch (err) {}
+  }
+}
+
+function handleHttpUpload(req, res, next) {
+  upload.array('files', config.httpUploadMaxFiles)(req, res, err => {
+    if (err) {
+      cleanupUploadedFiles(req.files);
+      const status = err.code === 'LIMIT_FILE_SIZE' || err.code === 'LIMIT_FILE_COUNT' ? 413 : 400;
+      return res.status(status).json({ error: err.message || 'Invalid upload request' });
+    }
+    next();
+  });
+}
+
+app.use(express.json({ limit: config.jsonBodyLimit }));
 const DIST_DIR = path.join(__dirname, 'dist');
 if (fs.existsSync(DIST_DIR)) {
   app.use(express.static(DIST_DIR));
@@ -67,22 +105,36 @@ app.use('/uploads', (req, res, next) => {
   try {
     relativePath = decodeURIComponent(req.path).replace(/^\/+/, '');
     resolveSafePath(UPLOADS_DIR, relativePath);
+    if (isInternalUploadFile(path.posix.basename(relativePath))) {
+      return res.status(404).end();
+    }
     next();
   } catch (err) {
     res.status(400).json({ error: 'Invalid upload path' });
   }
-}, express.static(UPLOADS_DIR));
+}, express.static(UPLOADS_DIR, {
+  setHeaders(response, filePath) {
+    response.setHeader('X-Content-Type-Options', 'nosniff');
+    if (ACTIVE_UPLOAD_EXTENSIONS.has(path.extname(filePath).toLowerCase())) {
+      response.setHeader('Content-Type', 'application/octet-stream');
+      response.setHeader(
+        'Content-Disposition',
+        `attachment; filename*=UTF-8''${encodeURIComponent(path.basename(filePath))}`
+      );
+    }
+  }
+}));
 
 const auth = createAuthMiddleware(AUTH_TOKEN);
 app.use('/api', auth.middleware);
 
 const uploadRateLimit = createRateLimiter({
-  windowMs: Number(process.env.UPLOAD_RATE_WINDOW_MS) || 60_000,
-  max: Number(process.env.UPLOAD_RATE_MAX) || 20
+  windowMs: config.uploadRateWindowMs,
+  max: config.uploadRateMax
 });
 const mutationRateLimit = createRateLimiter({
-  windowMs: Number(process.env.API_RATE_WINDOW_MS) || 60_000,
-  max: Number(process.env.API_RATE_MAX) || 120
+  windowMs: config.apiRateWindowMs,
+  max: config.apiRateMax
 });
 
 // File Category Helper
@@ -104,8 +156,96 @@ function getFileCategory(filename) {
   return 'other';
 }
 
-function isInternalUploadFile(filename) {
-  return filename === 'server_state.json' || filename === 'server_state.json.tmp';
+function encodeUploadUrl(relativePath) {
+  return `/uploads/${relativePath.split('/').map(encodeURIComponent).join('/')}`;
+}
+
+function collectUploadFiles() {
+  const files = [];
+  const pending = [{ directory: UPLOADS_DIR, relativeDirectory: '' }];
+
+  while (pending.length > 0) {
+    const current = pending.pop();
+    const entries = fs.readdirSync(current.directory, { withFileTypes: true });
+
+    for (const entry of entries) {
+      if (isInternalUploadFile(entry.name)) continue;
+      const relativePath = current.relativeDirectory
+        ? `${current.relativeDirectory}/${entry.name}`
+        : entry.name;
+      const filePath = path.join(current.directory, entry.name);
+
+      if (entry.isDirectory()) {
+        pending.push({ directory: filePath, relativeDirectory: relativePath });
+      } else if (entry.isFile()) {
+        const stats = fs.lstatSync(filePath);
+        if (!stats.isSymbolicLink()) files.push({ relativePath, filePath, stats });
+      }
+    }
+  }
+
+  return files;
+}
+
+function resolveUploadFile(relativePath) {
+  const normalized = normalizeRelativePath(relativePath);
+  if (isInternalUploadFile(path.posix.basename(normalized))) {
+    throw new Error('Internal upload files cannot be modified');
+  }
+  return {
+    normalized,
+    resolved: resolveSafePath(UPLOADS_DIR, normalized).resolved
+  };
+}
+
+function getPartPath(filePath) {
+  return `${filePath}${PART_SUFFIX}`;
+}
+
+function getRegularFileStat(filePath) {
+  let stat;
+  try {
+    stat = fs.lstatSync(filePath);
+  } catch (err) {
+    if (err.code === 'ENOENT') return null;
+    throw err;
+  }
+  if (stat.isSymbolicLink() || !stat.isFile()) return null;
+  return stat;
+}
+
+function removePartFile(filePath) {
+  const partPath = getPartPath(filePath);
+  const stat = getRegularFileStat(partPath);
+  if (stat) fs.unlinkSync(partPath);
+}
+
+function movePartFile(oldPath, newPath) {
+  const oldPartPath = getPartPath(oldPath);
+  const newPartPath = getPartPath(newPath);
+  const oldStat = getRegularFileStat(oldPartPath);
+  if (!oldStat) return;
+  if (getRegularFileStat(newPartPath)) throw new Error('A staged upload already exists at the target name');
+  fs.mkdirSync(path.dirname(newPartPath), { recursive: true });
+  fs.renameSync(oldPartPath, newPartPath);
+}
+
+function matchesRepositoryMetadata(record, stats) {
+  if (!record) return false;
+  return Number(record.size) === stats.size &&
+    Number(record.targetMtimeMs) === stats.mtimeMs &&
+    Number(record.targetCtimeMs) === stats.ctimeMs &&
+    Number(record.targetIno) === stats.ino &&
+    Number(record.targetDev) === stats.dev;
+}
+
+function matchesStateMetadata(record, stats) {
+  if (!record) return false;
+  return Number(record.size) === stats.size &&
+    Number(record.targetMtimeMs) === stats.mtimeMs &&
+    Number(record.targetCtimeMs) === stats.ctimeMs &&
+    Number(record.targetIno) === stats.ino &&
+    Number(record.targetDev) === stats.dev;
 }
 
 function resolveHashScanPath(sourcePath) {
@@ -122,6 +262,39 @@ function resolveHashScanPath(sourcePath) {
   }
 
   return resolveSafePath(root, path.relative(root, candidate));
+}
+
+function collectHashDirectories() {
+  const root = path.resolve(HASH_SCAN_ROOT);
+  const rootStat = fs.lstatSync(root);
+  if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) {
+    throw new Error('Hash scan root must be a real directory');
+  }
+
+  const directories = [{ value: '.', label: '.' }];
+  const pending = [{ absolutePath: root, relativePath: '' }];
+
+  while (pending.length > 0) {
+    const current = pending.pop();
+    const entries = fs.readdirSync(current.absolutePath, { withFileTypes: true });
+
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+
+      const relativePath = current.relativePath
+        ? `${current.relativePath}/${entry.name}`
+        : entry.name;
+      const absolutePath = path.join(current.absolutePath, entry.name);
+      const entryStat = fs.lstatSync(absolutePath);
+      if (entryStat.isSymbolicLink() || !entryStat.isDirectory()) continue;
+
+      directories.push({ value: relativePath, label: relativePath });
+      pending.push({ absolutePath, relativePath });
+    }
+  }
+
+  directories.sort((a, b) => a.value.localeCompare(b.value));
+  return directories;
 }
 
 function getCachedServerMd5(filePath, stats) {
@@ -147,33 +320,71 @@ function invalidateMd5Cache(...filePaths) {
   filePaths.forEach(filePath => md5Cache.delete(path.resolve(filePath)));
 }
 
-// 1. Get all files with metadata & MD5 hash
+// 1. Get all files with metadata & verified hash when available
 app.get('/api/files', async (req, res) => {
   try {
-    const files = fs.readdirSync(UPLOADS_DIR);
+    const includeHash = ['1', 'true', 'yes'].includes(String(req.query.includeHash || '').toLowerCase());
+    const files = collectUploadFiles();
     const fileList = [];
 
     for (const file of files) {
-      if (isInternalUploadFile(file)) continue;
-      const filePath = path.join(UPLOADS_DIR, file);
-      try {
-        const stats = fs.lstatSync(filePath);
-        if (stats.isSymbolicLink()) continue;
-        if (!stats.isFile()) continue;
+      const stateFile = serverStateManager?.state?.files?.[file.relativePath];
+      const repositoryFile = serverStateManager?.getRepositoryFile(file.relativePath);
+      let serverHash = null;
+      let hashAlgorithm = null;
+      let hashStatus = 'unknown';
+      const stateAlgorithm = stateFile?.hashAlgorithm || (stateFile?.md5 ? 'md5' : null);
 
-        const serverMd5 = await getCachedServerMd5(filePath, stats);
+      if (repositoryFile && matchesRepositoryMetadata(repositoryFile, file.stats) && repositoryFile.hash) {
+        serverHash = repositoryFile.hash;
+        hashAlgorithm = repositoryFile.hashAlgorithm;
+        hashStatus = repositoryFile.hashStatus || 'unknown';
+      } else if (
+        stateFile?.status === 'verified' &&
+        stateAlgorithm &&
+        matchesStateMetadata(stateFile, file.stats)
+      ) {
+        serverHash = stateFile.serverHash || stateFile.serverMd5 || null;
+        hashAlgorithm = stateAlgorithm;
+        hashStatus = serverHash ? 'verified' : 'unknown';
+      } else if (includeHash) {
+        serverHash = await getCachedServerMd5(file.filePath, file.stats);
+        hashAlgorithm = 'md5';
+        hashStatus = serverHash ? 'server-only' : 'unknown';
+        if (serverHash) {
+          serverStateManager?.upsertRepositoryFile({
+            relativePath: file.relativePath,
+            size: file.stats.size,
+            hash: serverHash,
+            hashAlgorithm: 'md5',
+            md5: serverHash,
+            hashStatus,
+            createdAtMs: file.stats.birthtimeMs,
+            modifiedAtMs: file.stats.mtimeMs,
+            targetMtimeMs: file.stats.mtimeMs,
+            targetCtimeMs: file.stats.ctimeMs,
+            targetIno: file.stats.ino,
+            targetDev: file.stats.dev
+          });
+        }
+      } else if (repositoryFile) {
+        hashStatus = 'stale';
+      }
 
-        fileList.push({
-          name: file,
-          size: stats.size,
-          md5: serverMd5,
-          createdAt: stats.birthtime || stats.ctime,
-          modifiedAt: stats.mtime,
-          category: getFileCategory(file),
-          extension: path.extname(file).toLowerCase(),
-          url: `/uploads/${encodeURIComponent(file)}`
-        });
-      } catch (e) {}
+      fileList.push({
+        name: file.relativePath,
+        relativePath: file.relativePath,
+        size: file.stats.size,
+        hash: serverHash,
+        hashAlgorithm,
+        md5: hashAlgorithm === 'md5' ? serverHash : null,
+        hashStatus,
+        createdAt: file.stats.birthtime || file.stats.ctime,
+        modifiedAt: file.stats.mtime,
+        category: getFileCategory(file.relativePath),
+        extension: path.extname(file.relativePath).toLowerCase(),
+        url: encodeUploadUrl(file.relativePath)
+      });
     }
 
     fileList.sort((a, b) => new Date(b.modifiedAt) - new Date(a.modifiedAt));
@@ -183,36 +394,112 @@ app.get('/api/files', async (req, res) => {
   }
 });
 
-// 2. Upload multiple files via standard HTTP
-app.post('/api/upload', uploadRateLimit, upload.array('files', 20), (req, res) => {
+// 2. Upload multiple files via standard HTTP. This remains a convenience path
+// for small files; bulk/resumable transfers use the WebSocket uploader.
+app.post('/api/upload', uploadRateLimit, handleHttpUpload, async (req, res) => {
   if (!req.files || req.files.length === 0) {
     return res.status(400).json({ error: 'No files were uploaded.' });
   }
 
-  const uploaded = req.files.map(file => {
-    const filePath = path.join(UPLOADS_DIR, file.filename);
-    const stats = fs.statSync(filePath);
-    return {
-      name: file.filename,
-      size: stats.size,
-      createdAt: stats.birthtime || stats.ctime,
-      modifiedAt: stats.mtime,
-      category: getFileCategory(file.filename),
-      extension: path.extname(file.filename).toLowerCase(),
-      url: `/uploads/${encodeURIComponent(file.filename)}`
-    };
-  });
+  let hashAlgorithm;
+  try {
+    // Requests from older clients that submit clientHashes without an
+    // algorithm are MD5 requests. New clients default to SHA-256.
+    hashAlgorithm = normalizeHashAlgorithm(
+      req.body?.algorithm || (req.body?.clientHashes ? 'md5' : 'sha256')
+    );
+  } catch (err) {
+    for (const file of req.files) {
+      try { fs.unlinkSync(path.join(UPLOADS_DIR, file.filename)); } catch (cleanupErr) {}
+    }
+    return res.status(400).json({ error: err.message });
+  }
+
+  let clientHashes = null;
+  if (req.body?.clientHashes) {
+    try {
+      clientHashes = JSON.parse(req.body.clientHashes);
+      if (!Array.isArray(clientHashes) || clientHashes.length !== req.files.length) {
+        throw new Error(`clientHashes must contain one ${hashAlgorithm.toUpperCase()} value per uploaded file`);
+      }
+      const hashLength = hashAlgorithm === 'sha256' ? 64 : 32;
+      const hashPattern = new RegExp(`^[a-f0-9]{${hashLength}}$`, 'i');
+      if (clientHashes.some(hash => typeof hash !== 'string' || !hashPattern.test(hash))) {
+        throw new Error(`clientHashes contains an invalid ${hashAlgorithm.toUpperCase()} value`);
+      }
+    } catch (err) {
+      for (const file of req.files) {
+        try { fs.unlinkSync(path.join(UPLOADS_DIR, file.filename)); } catch (cleanupErr) {}
+      }
+      return res.status(400).json({ error: err.message });
+    }
+  }
+
+  const uploaded = [];
+  try {
+    for (let index = 0; index < req.files.length; index += 1) {
+      const file = req.files[index];
+      const filePath = path.join(UPLOADS_DIR, file.filename);
+      const stats = fs.statSync(filePath);
+      const serverHash = hashAlgorithm === 'md5'
+        ? await getCachedServerMd5(filePath, stats)
+        : await calculateServerHash(filePath, hashAlgorithm);
+      const expectedHash = clientHashes ? clientHashes[index].toLowerCase() : null;
+
+      if (expectedHash && expectedHash !== serverHash) {
+        throw new Error(`${hashAlgorithm.toUpperCase()} checksum mismatch for ${file.originalname}`);
+      }
+
+      serverStateManager?.upsertRepositoryFile({
+        relativePath: file.filename,
+        size: stats.size,
+        hash: serverHash,
+        hashAlgorithm,
+        md5: hashAlgorithm === 'md5' ? serverHash : null,
+        hashStatus: expectedHash ? 'verified' : 'server-only',
+        createdAtMs: stats.birthtimeMs,
+        modifiedAtMs: stats.mtimeMs,
+        targetMtimeMs: stats.mtimeMs,
+        targetCtimeMs: stats.ctimeMs,
+        targetIno: stats.ino,
+        targetDev: stats.dev
+      });
+
+      uploaded.push({
+        name: file.filename,
+        relativePath: file.filename,
+        size: stats.size,
+        hash: serverHash,
+        hashAlgorithm,
+        md5: hashAlgorithm === 'md5' ? serverHash : null,
+        hashStatus: expectedHash ? 'verified' : 'server-only',
+        createdAt: stats.birthtime || stats.ctime,
+        modifiedAt: stats.mtime,
+        category: getFileCategory(file.filename),
+        extension: path.extname(file.filename).toLowerCase(),
+        url: encodeUploadUrl(file.filename)
+      });
+    }
+  } catch (err) {
+    for (const file of req.files) {
+      const filePath = path.join(UPLOADS_DIR, file.filename);
+      try {
+        fs.unlinkSync(filePath);
+        invalidateMd5Cache(filePath);
+      } catch (cleanupErr) {}
+      serverStateManager?.deleteRepositoryFile(file.filename);
+    }
+    serverStateManager?.flushSave();
+    return res.status(422).json({ error: err.message });
+  }
 
   res.json({ message: 'Files uploaded successfully', files: uploaded });
 });
 
 // 3. Storage statistics endpoint
 app.get('/api/stats', (req, res) => {
-  fs.readdir(UPLOADS_DIR, (err, files) => {
-    if (err) {
-      return res.status(500).json({ error: 'Failed to compute stats' });
-    }
-
+  try {
+    const files = collectUploadFiles();
     let totalSize = 0;
     let totalFiles = 0;
     const categories = {
@@ -226,21 +513,13 @@ app.get('/api/stats', (req, res) => {
     };
 
     files.forEach(file => {
-      if (isInternalUploadFile(file)) return;
-      const filePath = path.join(UPLOADS_DIR, file);
-      try {
-        const stats = fs.lstatSync(filePath);
-        if (stats.isSymbolicLink()) return;
-        if (stats.isFile()) {
-          totalFiles += 1;
-          const cat = getFileCategory(file);
-          totalSize += stats.size;
-          if (categories[cat]) {
-            categories[cat].count += 1;
-            categories[cat].size += stats.size;
-          }
-        }
-      } catch (e) {}
+      totalFiles += 1;
+      const cat = getFileCategory(file.relativePath);
+      totalSize += file.stats.size;
+      if (categories[cat]) {
+        categories[cat].count += 1;
+        categories[cat].size += file.stats.size;
+      }
     });
 
     res.json({
@@ -248,20 +527,25 @@ app.get('/api/stats', (req, res) => {
       totalSize,
       categories
     });
-  });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to compute stats' });
+  }
 });
 
 // 4. Delete file
-app.delete('/api/files/:filename', mutationRateLimit, (req, res) => {
+app.delete('/api/files/:filename(*)', mutationRateLimit, (req, res) => {
   const filename = req.params.filename;
   let filePath;
+  let normalizedFilename;
   try {
-    filePath = resolveSafePath(UPLOADS_DIR, normalizeFilename(filename)).resolved;
+    const resolved = resolveUploadFile(filename);
+    normalizedFilename = resolved.normalized;
+    filePath = resolved.resolved;
   } catch (err) {
     return res.status(400).json({ error: 'Invalid filename' });
   }
 
-  if (!fs.existsSync(filePath)) {
+  if (!getRegularFileStat(filePath)) {
     return res.status(404).json({ error: 'File not found' });
   }
 
@@ -270,12 +554,18 @@ app.delete('/api/files/:filename', mutationRateLimit, (req, res) => {
       return res.status(500).json({ error: 'Failed to delete file' });
     }
     invalidateMd5Cache(filePath);
-    res.json({ message: 'File deleted successfully', filename });
+    try { removePartFile(filePath); } catch (partError) {
+      console.error('[Server] Failed to remove staged upload after delete:', partError.message);
+    }
+    serverStateManager?.deleteRepositoryFile(normalizedFilename);
+    serverStateManager?.markTrackedFileDeleted(normalizedFilename);
+    serverStateManager?.flushSave();
+    res.json({ message: 'File deleted successfully', filename: normalizedFilename });
   });
 });
 
 // 5. Rename file
-app.patch('/api/files/:filename', mutationRateLimit, (req, res) => {
+app.patch('/api/files/:filename(*)', mutationRateLimit, (req, res) => {
   const oldName = req.params.filename;
   const { newName } = req.body;
 
@@ -285,33 +575,58 @@ app.patch('/api/files/:filename', mutationRateLimit, (req, res) => {
 
   let oldPath;
   let newPath;
+  let normalizedOldName;
+  let normalizedNewName;
   try {
-    oldPath = resolveSafePath(UPLOADS_DIR, normalizeFilename(oldName)).resolved;
-    newPath = resolveSafePath(UPLOADS_DIR, normalizeFilename(newName)).resolved;
+    const oldFile = resolveUploadFile(oldName);
+    normalizedOldName = oldFile.normalized;
+    oldPath = oldFile.resolved;
+    const requestedNewName = normalizeRelativePath(newName);
+    normalizedNewName = requestedNewName.includes('/')
+      ? requestedNewName
+      : path.posix.join(path.posix.dirname(normalizedOldName), requestedNewName);
+    newPath = resolveUploadFile(normalizedNewName).resolved;
   } catch (err) {
     return res.status(400).json({ error: 'Invalid filename' });
   }
 
-  if (!fs.existsSync(oldPath)) {
+  if (!getRegularFileStat(oldPath)) {
     return res.status(404).json({ error: 'Source file not found' });
   }
 
   if (fs.existsSync(newPath)) {
     return res.status(400).json({ error: 'File with target name already exists' });
   }
+  if (serverStateManager?.state?.files?.[normalizedNewName]) {
+    return res.status(400).json({ error: 'A tracked upload already exists at the target name' });
+  }
 
-  fs.rename(oldPath, newPath, err => {
-    if (err) {
-      return res.status(500).json({ error: 'Failed to rename file' });
+  fs.mkdir(path.dirname(newPath), { recursive: true }, mkdirErr => {
+    if (mkdirErr) {
+      return res.status(500).json({ error: 'Failed to prepare rename destination' });
     }
-    invalidateMd5Cache(oldPath, newPath);
-    res.json({ message: 'File renamed successfully', oldName, newName });
+    fs.rename(oldPath, newPath, err => {
+      if (err) {
+        return res.status(500).json({ error: 'Failed to rename file' });
+      }
+      try {
+        movePartFile(oldPath, newPath);
+        serverStateManager?.renameRepositoryFile(normalizedOldName, normalizedNewName);
+        serverStateManager?.renameTrackedFile(normalizedOldName, normalizedNewName);
+        serverStateManager?.flushSave();
+        invalidateMd5Cache(oldPath, newPath);
+        res.json({ message: 'File renamed successfully', oldName: normalizedOldName, newName: normalizedNewName });
+      } catch (renameError) {
+        try { fs.renameSync(newPath, oldPath); } catch (rollbackError) {}
+        return res.status(500).json({ error: 'Failed to finalize file rename' });
+      }
+    });
   });
 });
 
 // 6. Hash Scanner REST Endpoint
 app.post('/api/hash/scan', uploadRateLimit, async (req, res) => {
-  const { sourcePath, outputFile, algorithm = 'md5' } = req.body;
+  const { sourcePath, outputFile, algorithm = config.defaultHashAlgorithm } = req.body;
   if (!sourcePath) {
     return res.status(400).json({ error: 'sourcePath is required' });
   }
@@ -321,18 +636,44 @@ app.post('/api/hash/scan', uploadRateLimit, async (req, res) => {
     const safeOutputFile = outputFile
       ? resolveSafePath(HASH_SCAN_ROOT, outputFile).resolved
       : null;
-    const result = await generateHashes({ sourcePath: source.resolved, outputFile: safeOutputFile, algorithm });
-    res.json(result);
+    if (safeOutputFile && isInternalUploadFile(path.basename(safeOutputFile))) {
+      throw new Error('Reserved output filename');
+    }
+
+    const result = await generateHashes({
+      sourcePath: source.resolved,
+      outputFile: safeOutputFile,
+      algorithm,
+      excludeFile: filePath => isInternalUploadFile(path.basename(filePath))
+    });
+    // Absolute server paths are useful to the CLI but should not be returned
+    // by an authenticated browser API. Keep the scan response portable and
+    // avoid disclosing the server filesystem layout.
+    res.json({
+      ...result,
+      sourcePath: source.normalized,
+      normalizedSource: source.normalized,
+      files: result.files.map(({ absolutePath, ...file }) => file)
+    });
   } catch (err) {
     res.status(403).json({ error: 'Hash scans are restricted to the configured scan directory' });
   }
 });
 
-// 7. Get Current Session State (from server state.json)
+app.get('/api/hash/directories', (req, res) => {
+  try {
+    res.json({
+      root: path.basename(HASH_SCAN_ROOT) || 'configured root',
+      directories: collectHashDirectories()
+    });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to list configured hash directories' });
+  }
+});
+
+// 7. Get current upload session state from SQLite
 app.get('/api/hash/state', (req, res) => {
-  const statePath = path.join(UPLOADS_DIR, 'server_state.json');
-  const sm = new StateManager(statePath);
-  const state = sm.loadState();
+  const state = serverStateManager?.state;
 
   if (!state) {
     return res.json({ status: 'no_session', message: 'No active upload session state found' });
@@ -341,15 +682,155 @@ app.get('/api/hash/state', (req, res) => {
   res.json(state);
 });
 
+async function runManifestAudit() {
+  const state = serverStateManager?.state;
+  if (!state || !state.files) {
+    return { status: 'no_session', totalFiles: 0, matchCount: 0, mismatchCount: 0, missingCount: 0, results: [] };
+  }
+
+  const results = [];
+  const startedAt = new Date().toISOString();
+  let matchCount = 0;
+  let mismatchCount = 0;
+  let missingCount = 0;
+
+  for (const key of Object.keys(state.files)) {
+    const fileItem = state.files[key];
+    const relativePath = fileItem.relativePath || key;
+    const algorithm = fileItem.hashAlgorithm || (fileItem.md5 ? 'md5' : config.defaultHashAlgorithm);
+    const clientHash = fileItem.hash || fileItem.md5 || null;
+    let targetPath;
+
+    try {
+      targetPath = resolveUploadFile(relativePath).resolved;
+      const stats = fs.lstatSync(targetPath);
+      if (!stats.isFile() || stats.size !== fileItem.size) {
+        throw new Error('missing or incorrect file size');
+      }
+
+      const serverHash = await calculateServerHash(targetPath, algorithm);
+      const match = Boolean(clientHash && serverHash === clientHash.toLowerCase());
+      if (match) matchCount++;
+      else mismatchCount++;
+
+      serverStateManager.updateFile(relativePath, {
+        status: match ? 'verified' : 'failed',
+        serverHash,
+        serverMd5: algorithm === 'md5' ? serverHash : null,
+        verified: match,
+        bytesUploaded: stats.size,
+        targetMtimeMs: stats.mtimeMs,
+        targetCtimeMs: stats.ctimeMs,
+        targetIno: stats.ino,
+        targetDev: stats.dev,
+        error: match ? null : `${algorithm.toUpperCase()} checksum mismatch`
+      });
+      serverStateManager.upsertRepositoryFile({
+        relativePath,
+        size: stats.size,
+        hash: serverHash,
+        hashAlgorithm: algorithm,
+        md5: algorithm === 'md5' ? serverHash : null,
+        hashStatus: match ? 'verified' : 'mismatch',
+        createdAtMs: stats.birthtimeMs,
+        modifiedAtMs: stats.mtimeMs,
+        targetMtimeMs: stats.mtimeMs,
+        targetCtimeMs: stats.ctimeMs,
+        targetIno: stats.ino,
+        targetDev: stats.dev
+      });
+
+      results.push({
+        relativePath,
+        hashAlgorithm: algorithm,
+        clientHash,
+        serverHash,
+        ...(algorithm === 'md5' ? { clientMd5: clientHash, serverMd5: serverHash } : {}),
+        status: match ? 'verified' : 'mismatch',
+        size: stats.size,
+        match
+      });
+    } catch (err) {
+      missingCount++;
+      serverStateManager.updateFile(relativePath, {
+        status: 'failed',
+        serverHash: null,
+        serverMd5: null,
+        verified: false,
+        bytesUploaded: 0,
+        targetMtimeMs: null,
+        targetCtimeMs: null,
+        targetIno: null,
+        targetDev: null,
+        error: err.message
+      });
+      serverStateManager.deleteRepositoryFile(relativePath);
+      results.push({
+        relativePath,
+        hashAlgorithm: algorithm,
+        clientHash,
+        serverHash: null,
+        ...(algorithm === 'md5' ? { clientMd5: clientHash, serverMd5: null } : {}),
+        status: 'missing',
+        size: fileItem.size,
+        match: false,
+        error: err.message
+      });
+    }
+  }
+
+  const completedAt = new Date().toISOString();
+  serverStateManager.flushSave();
+  serverStateManager.recordAudit({
+    sessionId: state.sessionId,
+    status: 'complete',
+    startedAt,
+    completedAt,
+    results
+  });
+  return {
+    status: 'complete',
+    totalFiles: results.length,
+    matchCount,
+    mismatchCount,
+    missingCount,
+    results
+  };
+}
+
+app.post('/api/hash/audit', uploadRateLimit, async (req, res) => {
+  try {
+    if (!auditPromise) {
+      auditPromise = runManifestAudit().finally(() => {
+        auditPromise = null;
+      });
+    }
+    res.json(await auditPromise);
+  } catch (err) {
+    res.status(500).json({ error: 'Manifest audit failed' });
+  }
+});
+
 // Create HTTP Server & Bind WebSockets
 const server = http.createServer(app);
 const { wss, stateManager } = initWebSocketServer(server, UPLOADS_DIR, {
   authToken: AUTH_TOKEN,
-  maxConnectionsPerAddress: Number(process.env.WS_CONNECTION_RATE_MAX) || 20,
-  connectionRateWindowMs: Number(process.env.WS_CONNECTION_RATE_WINDOW_MS) || 60_000
+  maxConnectionsPerAddress: config.wsConnectionRateMax,
+  connectionRateWindowMs: config.wsConnectionRateWindowMs,
+  maxPayload: config.wsMaxPayload,
+  maxChunkSize: config.wsMaxChunkSize,
+  maxFileSize: config.wsMaxFileSize,
+  maxTotalBytes: config.wsMaxTotalBytes,
+  maxManifestBytes: config.wsMaxManifestBytes,
+  maxManifestFiles: config.wsMaxManifestFiles,
+  authTimeoutMs: config.wsAuthTimeoutMs,
+  syncEachChunk: config.wsSyncEachChunk,
+  defaultHashAlgorithm: config.defaultHashAlgorithm,
+  databasePath: config.stateDbPath
 });
+serverStateManager = stateManager;
 
-const HOST = process.env.HOST || '0.0.0.0';
+const HOST = config.host;
 
 server.listen(PORT, HOST, () => {
   console.log(`🚀 Server running on http://${HOST}:${PORT}`);

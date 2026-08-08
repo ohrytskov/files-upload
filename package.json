@@ -7,6 +7,9 @@
     "start": "node server.js",
     "server": "node --watch server.js",
     "dev": "vite",
+    "test": "node --test",
+    "test:coverage": "node --test --experimental-test-coverage",
+    "test:all": "npm test && npm run build",
     "build": "vite build",
     "preview": "vite preview"
   },
@@ -18,11 +21,14 @@
     "react",
     "vite",
     "md5",
-    "websocket"
+    "websocket",
+    "sqlite"
   ],
   "author": "",
   "license": "ISC",
   "dependencies": {
+    "better-sqlite3": "^13.0.3",
+    "dotenv": "^16.6.1",
     "express": "^4.19.2",
     "lucide-react": "^1.28.0",
     "multer": "^1.4.5-lts.1",
