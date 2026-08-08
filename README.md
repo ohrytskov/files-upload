@@ -2,6 +2,8 @@
 
 A high-performance, resilient file upload and checksum verification repository built with **Node.js**, **Express**, **WebSockets (`ws`)**, and **React + Vite**.
 
+The server persists its state in SQLite. It prefers `better-sqlite3`; on Node.js 22.5+ installations where that native binary cannot load, it automatically uses Node's built-in `node:sqlite` driver.
+
 ---
 
 ## 🌟 Key Features
@@ -13,7 +15,7 @@ A high-performance, resilient file upload and checksum verification repository b
 
 2. **WebSocket Batch Upload with Resumption (`lib/ws-client.js` & `lib/ws-server.js`)**:
    - Chunked streaming file transfer over WebSockets.
-   - **Interruption Recovery (`state.json`)**: Persists session upload state locally and on server. If interrupted (connection drop, server crash, pause), re-running the upload resumes from the exact chunk offset without re-transferring verified files.
+   - **Interruption Recovery**: Persists the client session in the configured local `state.json` and the server session, repository metadata, and audit results in SQLite. If interrupted (connection drop, server crash, pause), re-running the upload resumes from the exact chunk offset without re-transferring verified files.
 
 3. **Real-time Transfer Progress & Speed Dashboard**:
    - Live speed (MB/s), Estimated Time Remaining (ETA), uploaded files count, and byte totals.
@@ -21,7 +23,7 @@ A high-performance, resilient file upload and checksum verification repository b
 
 4. **Server-side Hash Verification & Comparison Audit**:
    - Computes the selected server-side hash upon file completion.
-   - Compares client vs server hashes to guarantee data integrity; MD5 remains the default for compatibility and SHA-256 is available when stronger collision resistance is required.
+   - Compares client vs server hashes to guarantee data integrity; SHA-256 is the default and MD5 remains available for legacy compatibility.
    - Generates full verification audit reports.
 
 5. **2-Module Architecture (Client & Server)**:
@@ -43,11 +45,26 @@ npm install
 npm run build
 npm start
 ```
+
+Server configuration is loaded from `.env`. The current default is:
+```dotenv
+HASH_SCAN_ROOT=/var/www/hello/my/files-area/files-upload/uploads
+```
+Copy `.env.example` when setting up another installation and change the path as needed. Shell environment variables still take precedence over `.env`.
+
 Server runs on:
 - Web Interface: `http://localhost:3000`
 - WebSocket Upload Endpoint: `ws://localhost:3000/ws/upload`
 
 To enable authentication, set `CLOUDVAULT_AUTH_TOKEN` before starting the server. Enter the same token in the dashboard API token field or pass it to the CLI with `--token`.
+
+### Capacity and production notes
+
+The WebSocket uploader is the large-transfer path. It streams one bounded chunk at a time, writes to a hidden staging file, verifies the complete hash, and only then atomically publishes the final file. The default 4 MiB chunk size keeps transfer memory bounded; `WS_MAX_CHUNK_SIZE`, `WS_MAX_PAYLOAD`, `WS_MAX_MANIFEST_BYTES`, and `WS_MAX_MANIFEST_FILES` protect the server from oversized requests.
+
+This is suitable for a single host handling thousands of files and multi-gigabyte batches when the host has sufficient disk, CPU, and network capacity. It is not yet a horizontally scalable object-storage service: one Node process permits one active WebSocket upload session, the active manifest remains in memory, and an audit rereads files when its cached verification metadata is unavailable or has changed. Upload state, repository hash metadata, and audit results are persisted in SQLite at `STATE_DB_PATH` (default: `uploads/cloudvault.sqlite`). For larger or concurrent workloads, use a database/object store and a resumable protocol behind a job/session service.
+
+For production deployments, configure a non-empty `CLOUDVAULT_AUTH_TOKEN`, terminate WebSocket traffic over TLS (`wss://`) at a reverse proxy, enforce storage quotas/free-space monitoring, back up the uploads directory and SQLite database, and test the filesystem’s rename/fsync behavior. Per-chunk fsync is disabled by default for throughput and the completed file is synced before publication; set `WS_SYNC_EACH_CHUNK=true` when stronger power-loss durability is worth the throughput cost.
 
 ### 2. Run Stateful Batch Upload via CLI
 ```bash
@@ -63,9 +80,9 @@ node bin/upload-cli.js -p "/var/www/hello/my/files-area" -o "hashes.txt"
 
 ### 3. Interactive Web UI
 Open `http://localhost:3000` in your browser to access:
-- **File Repository**: View, preview, search, download, rename, or delete uploaded files with MD5 tags.
+- **File Repository**: View, preview, search, download, rename, or delete uploaded files with hash tags.
 - **WebSocket Batch Uploader**: Select local files/directories, choose MD5 or SHA-256, watch real-time speeds and progress bars, and pause/resume transfers.
-- **Hash Audit Report**: View side-by-side client and server MD5 verification status for repository files.
+- **Hash Audit Report**: Select a local directory and a configured server directory, then compare SHA-256 or MD5 hashes.
 
 ---
 
@@ -80,7 +97,7 @@ Options:
   -o, --output <file>    Path to save standard hashes.txt manifest
   --state <file>         State JSON path (default: state.json for resuming)
   --token <token>        Bearer token when authentication is enabled
-  --algorithm <name>     Hash algorithm: md5 (default) or sha256
+  --algorithm <name>     Hash algorithm: sha256 (default) or md5
 ```
 
 ---
@@ -96,7 +113,8 @@ files-upload/
 │   ├── chunk-protocol.js   # Binary WebSocket chunk framing
 │   ├── path-utils.js       # Upload path containment checks
 │   ├── security.js         # Token auth and rate limiting
-│   ├── state-manager.js    # Persistent state.json manager for interruption recovery
+│   ├── database.js         # SQLite state, repository, and audit persistence
+│   ├── state-manager.js    # Resumable state manager (JSON client / SQLite server)
 │   ├── ws-client.js        # Client WebSocket chunked uploader engine
 │   └── ws-server.js        # Server WebSocket upload handler & hash verification
 ├── src/                    # React UI source
