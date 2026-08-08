@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import Sidebar from './components/Sidebar';
 import FileRepository from './components/FileRepository';
 import WebSocketUploader from './components/WebSocketUploader';
@@ -6,6 +6,8 @@ import MD5AuditReport from './components/MD5AuditReport';
 import PreviewModal from './components/PreviewModal';
 import RenameModal from './components/RenameModal';
 import { apiFetch, getAuthToken, setAuthToken } from './utils/api';
+import { hashFile } from './utils/md5';
+import { DEFAULT_HASH_ALGORITHM } from './config';
 
 export default function App() {
   const [activeTab, setActiveTab] = useState('repository');
@@ -13,15 +15,26 @@ export default function App() {
   const [stats, setStats] = useState(null);
   const [authToken, setAuthTokenState] = useState(getAuthToken);
   const [toast, setToast] = useState(null);
+  const toastTimerRef = useRef(null);
 
   // Modals
   const [previewFile, setPreviewFile] = useState(null);
   const [renameFile, setRenameFile] = useState(null);
 
   const notify = (message, type = 'success') => {
-    setToast({ message, type });
-    window.setTimeout(() => setToast(null), 3500);
+    const allowedTypes = new Set(['success', 'info', 'warning', 'error']);
+    const normalizedType = allowedTypes.has(type) ? type : 'info';
+    if (toastTimerRef.current) window.clearTimeout(toastTimerRef.current);
+    setToast({ message, type: normalizedType });
+    toastTimerRef.current = window.setTimeout(() => {
+      setToast(null);
+      toastTimerRef.current = null;
+    }, 3500);
   };
+
+  useEffect(() => () => {
+    if (toastTimerRef.current) window.clearTimeout(toastTimerRef.current);
+  }, []);
 
   const handleAuthTokenChange = (token) => {
     setAuthToken(token);
@@ -31,20 +44,30 @@ export default function App() {
   const fetchFiles = async () => {
     try {
       const res = await apiFetch('/api/files');
-      const data = await res.json();
-      if (res.ok) setFiles(data.files || []);
+      const data = await res.json().catch(() => ({}));
+      if (res.ok) {
+        setFiles(data.files || []);
+      } else {
+        notify(data.error || 'Could not load repository files', 'error');
+      }
     } catch (err) {
       console.error(err);
+      notify('Could not load repository files', 'error');
     }
   };
 
   const fetchStats = async () => {
     try {
       const res = await apiFetch('/api/stats');
-      const data = await res.json();
-      if (res.ok) setStats(data);
+      const data = await res.json().catch(() => ({}));
+      if (res.ok) {
+        setStats(data);
+      } else {
+        notify(data.error || 'Could not load storage statistics', 'error');
+      }
     } catch (err) {
       console.error(err);
+      notify('Could not load storage statistics', 'error');
     }
   };
 
@@ -55,8 +78,27 @@ export default function App() {
 
   const handleUploadFiles = async (fileList) => {
     const formData = new FormData();
-    for (let i = 0; i < fileList.length; i++) {
-      formData.append('files', fileList[i]);
+    const files = Array.from(fileList || []);
+    const uploadAlgorithm = DEFAULT_HASH_ALGORITHM;
+
+    if (files.length === 0) {
+      notify('Select at least one file before uploading.', 'warning');
+      return;
+    }
+
+    try {
+      const clientHashes = [];
+      for (const file of files) {
+        clientHashes.push(await hashFile(file, uploadAlgorithm));
+      }
+      formData.append('algorithm', uploadAlgorithm);
+      formData.append('clientHashes', JSON.stringify(clientHashes));
+      for (const file of files) {
+        formData.append('files', file);
+      }
+    } catch (err) {
+      notify(`Could not hash selected files: ${err.message}`, 'error');
+      return;
     }
 
     try {
@@ -66,7 +108,7 @@ export default function App() {
       });
       if (res.ok) {
         const data = await res.json();
-        notify(`Uploaded ${data.files?.length || fileList.length} file(s).`);
+        notify(`Uploaded ${data.files?.length || files.length} file(s).`);
         fetchFiles();
         fetchStats();
       } else {
@@ -147,9 +189,29 @@ export default function App() {
         )}
       </main>
 
-      <PreviewModal file={previewFile} onClose={() => setPreviewFile(null)} />
-      <RenameModal file={renameFile} onClose={() => setRenameFile(null)} onSave={handleRenameFile} />
-      {toast && <div className={`toast toast-${toast.type}`}>{toast.message}</div>}
+      <PreviewModal file={previewFile} onClose={() => setPreviewFile(null)} onNotify={notify} />
+      <RenameModal file={renameFile} onClose={() => setRenameFile(null)} onSave={handleRenameFile} onNotify={notify} />
+      {toast && (
+        <div
+          className={`toast toast-${toast.type}`}
+          role={toast.type === 'error' ? 'alert' : 'status'}
+          aria-live={toast.type === 'error' ? 'assertive' : 'polite'}
+        >
+          <span>{toast.message}</span>
+          <button
+            type="button"
+            className="toast-dismiss"
+            aria-label="Dismiss message"
+            onClick={() => {
+              if (toastTimerRef.current) window.clearTimeout(toastTimerRef.current);
+              toastTimerRef.current = null;
+              setToast(null);
+            }}
+          >
+            ×
+          </button>
+        </div>
+      )}
     </div>
   );
 }

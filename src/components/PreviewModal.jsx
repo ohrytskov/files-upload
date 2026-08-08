@@ -1,8 +1,8 @@
 import React, { useEffect, useState } from 'react';
 import { X, Download, File } from 'lucide-react';
 import { apiFetch } from '../utils/api';
+import { TEXT_PREVIEW_MAX_BYTES } from '../config';
 
-const TEXT_PREVIEW_MAX_BYTES = 2 * 1024 * 1024;
 const TEXT_EXTENSIONS = new Set([
   '.txt', '.md', '.csv', '.log', '.xml', '.yaml', '.yml', '.ini', '.conf',
   '.js', '.jsx', '.ts', '.tsx', '.json', '.html', '.css', '.py', '.java',
@@ -14,7 +14,7 @@ function isTextFile(file) {
   return file.category === 'code' || TEXT_EXTENSIONS.has(extension);
 }
 
-export default function PreviewModal({ file, onClose }) {
+export default function PreviewModal({ file, onClose, onNotify }) {
   const [textContent, setTextContent] = useState('');
   const [textState, setTextState] = useState('idle');
 
@@ -42,7 +42,10 @@ export default function PreviewModal({ file, onClose }) {
         }
       })
       .catch(() => {
-        if (!cancelled) setTextState('error');
+        if (!cancelled) {
+          setTextState('error');
+          onNotify?.(`Unable to load the preview for ${file.name}.`, 'error');
+        }
       });
 
     return () => { cancelled = true; };
@@ -78,11 +81,26 @@ export default function PreviewModal({ file, onClose }) {
 
         <div className="modal-body" style={{ textAlign: 'center' }}>
           {file.category === 'image' ? (
-            <img src={file.url} alt={file.name} style={{ maxWidth: '100%', maxHeight: '50vh', borderRadius: '8px' }} />
+            <img
+              src={file.url}
+              alt={file.name}
+              style={{ maxWidth: '100%', maxHeight: '50vh', borderRadius: '8px' }}
+              onError={() => onNotify?.(`Unable to load the preview for ${file.name}.`, 'error')}
+            />
           ) : file.category === 'audio' ? (
-            <audio controls src={file.url} style={{ width: '100%', marginTop: '20px' }}></audio>
+            <audio
+              controls
+              src={file.url}
+              style={{ width: '100%', marginTop: '20px' }}
+              onError={() => onNotify?.(`Unable to load the preview for ${file.name}.`, 'error')}
+            ></audio>
           ) : file.category === 'video' ? (
-            <video controls src={file.url} style={{ maxWidth: '100%', maxHeight: '50vh' }}></video>
+            <video
+              controls
+              src={file.url}
+              style={{ maxWidth: '100%', maxHeight: '50vh' }}
+              onError={() => onNotify?.(`Unable to load the preview for ${file.name}.`, 'error')}
+            ></video>
           ) : isTextFile(file) ? (
             <div>
               {textState === 'loading' && <p style={{ color: '#94a3b8' }}>Loading preview...</p>}
@@ -104,7 +122,7 @@ export default function PreviewModal({ file, onClose }) {
         <footer style={{ padding: '16px 24px', background: 'rgba(0,0,0,0.2)', display: 'flex', gap: '12px', fontSize: '0.82rem', color: '#94a3b8' }}>
           <div>Size: {formatBytes(file.size)}</div>
           <div>Category: {file.category}</div>
-          <div>MD5: <code>{file.md5 || 'N/A'}</code></div>
+          <div>{(file.hashAlgorithm || (file.md5 ? 'md5' : 'sha256')).toUpperCase()}: <code>{file.hash || file.md5 || 'N/A'}</code></div>
         </footer>
       </div>
     </div>

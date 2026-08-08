@@ -1,8 +1,9 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { Play, Pause, CheckCircle2, AlertCircle } from 'lucide-react';
-import { hashArrayBuffer } from '../utils/md5';
+import { hashFile } from '../utils/md5';
+import { DEFAULT_HASH_ALGORITHM, MAX_FILE_RETRIES, UPLOAD_CHUNK_SIZE, UPLOAD_QUEUE_PAGE_SIZE } from '../config';
 
-const CHUNK_SIZE = 256 * 1024;
+const CHUNK_SIZE = UPLOAD_CHUNK_SIZE;
 
 function encodeBinaryChunk(relativePath, offset, arrayBuffer) {
   const header = new TextEncoder().encode(JSON.stringify({
@@ -19,14 +20,26 @@ function encodeBinaryChunk(relativePath, offset, arrayBuffer) {
   return frame.buffer;
 }
 
+function serializeManifest(files) {
+  return files.map(file => ({
+    relativePath: file.relativePath,
+    size: file.size,
+    hashAlgorithm: file.hashAlgorithm,
+    hash: file.hash,
+    ...(file.hashAlgorithm === 'md5' ? { md5: file.hash } : {})
+  }));
+}
+
 export default function WebSocketUploader({ onAuditTrigger, authToken, onNotify }) {
   const [serverUrl, setServerUrl] = useState(`${window.location.protocol === 'https:' ? 'wss' : 'ws'}://${window.location.host}/ws/upload`);
-  const [hashAlgorithm, setHashAlgorithm] = useState('md5');
+  const [hashAlgorithm, setHashAlgorithm] = useState(DEFAULT_HASH_ALGORITHM);
   const [manifest, setManifest] = useState(null);
   const [isScanning, setIsScanning] = useState(false);
   const [isUploading, setIsUploading] = useState(false);
   const [isPaused, setIsPaused] = useState(false);
   const [sessionStatus, setSessionStatus] = useState('Idle');
+  const [queuePage, setQueuePage] = useState(1);
+  const QUEUE_PAGE_SIZE = UPLOAD_QUEUE_PAGE_SIZE;
 
   // Stats
   const [stats, setStats] = useState({
@@ -46,14 +59,38 @@ export default function WebSocketUploader({ onAuditTrigger, authToken, onNotify 
   const startTimeRef = useRef(null);
   const transferredBytesRef = useRef(0);
   const lastOffsetsRef = useRef({});
+  const pausedRef = useRef(false);
+  const sessionIdRef = useRef(null);
+  const reconnectTimerRef = useRef(null);
+  const reconnectAttemptsRef = useRef(0);
+  const stoppingRef = useRef(false);
+  const auditRequestedRef = useRef(false);
+  const retryCountsRef = useRef({});
 
   useEffect(() => {
     manifestRef.current = manifest;
   }, [manifest]);
 
+  useEffect(() => () => {
+    stoppingRef.current = true;
+    if (reconnectTimerRef.current) window.clearTimeout(reconnectTimerRef.current);
+    reconnectTimerRef.current = null;
+    socketRef.current?.close();
+    socketRef.current = null;
+  }, []);
+
   const handleFilesSelected = async (event) => {
     const selectedFiles = Array.from(event.target.files || []);
-    if (selectedFiles.length === 0) return;
+    if (selectedFiles.length === 0) {
+      onNotify?.('No files were selected for the stateful upload.', 'info');
+      return;
+    }
+
+    if (isUploading) {
+      onNotify?.('Pause or finish the current upload before selecting a new batch.', 'warning');
+      event.target.value = '';
+      return;
+    }
 
     setIsScanning(true);
     try {
@@ -72,8 +109,9 @@ export default function WebSocketUploader({ onAuditTrigger, authToken, onNotify 
           file,
           relativePath,
           size: file.size,
+          sourceMtimeMs: file.lastModified,
           hashAlgorithm,
-          hash: await hashArrayBuffer(await file.arrayBuffer(), hashAlgorithm),
+          hash: await hashFile(file, hashAlgorithm),
           status: 'pending',
           offset: 0,
           serverMd5: null
@@ -90,8 +128,14 @@ export default function WebSocketUploader({ onAuditTrigger, authToken, onNotify 
       };
       manifestRef.current = data;
       setManifest(data);
+      sessionIdRef.current = `browser_${Date.now()}`;
+      retryCountsRef.current = {};
+      auditRequestedRef.current = false;
+      lastOffsetsRef.current = {};
+      setQueuePage(1);
       setSessionStatus('Files Hashed & Ready');
       setStats(prev => ({ ...prev, totalFiles: data.totalFiles, totalBytes: data.totalBytes }));
+      onNotify?.(`${files.length} file(s) hashed and ready to upload.`, 'success');
     } catch (error) {
       onNotify?.(error.message || 'Failed to read selected files', 'error');
     } finally {
@@ -100,22 +144,60 @@ export default function WebSocketUploader({ onAuditTrigger, authToken, onNotify 
   };
 
   const startUpload = () => {
-    if (!manifestRef.current) return;
+    if (isScanning) {
+      onNotify?.('Please wait until file hashing is complete.', 'info');
+      return;
+    }
 
-    if (isPaused && socketRef.current && socketRef.current.readyState === WebSocket.OPEN) {
+    if (!manifestRef.current?.files?.length) {
+      setSessionStatus('Waiting for files');
+      onNotify?.('Select a file or directory before starting the stateful upload.', 'warning');
+      return;
+    }
+
+    if (!serverUrl.trim()) {
+      setSessionStatus('Waiting for server URL');
+      onNotify?.('Enter a WebSocket server URL before starting the upload.', 'warning');
+      return;
+    }
+
+    if (reconnectTimerRef.current) {
+      window.clearTimeout(reconnectTimerRef.current);
+      reconnectTimerRef.current = null;
+    }
+
+    if (pausedRef.current && socketRef.current && socketRef.current.readyState === WebSocket.OPEN) {
+      pausedRef.current = false;
       setIsPaused(false);
       setSessionStatus('Uploading...');
       uploadNextFile();
       return;
     }
 
+    const isNewSession = !sessionIdRef.current;
+    pausedRef.current = false;
+    stoppingRef.current = false;
+    if (isNewSession) {
+      auditRequestedRef.current = false;
+      reconnectAttemptsRef.current = 0;
+      retryCountsRef.current = {};
+      sessionIdRef.current = `browser_${Date.now()}`;
+    }
     setSessionStatus('Connecting...');
-    const ws = new WebSocket(serverUrl);
+    let ws;
+    try {
+      ws = new WebSocket(serverUrl.trim());
+    } catch (error) {
+      setSessionStatus('Invalid WebSocket URL');
+      onNotify?.('The WebSocket URL is invalid. Use a ws:// or wss:// URL.', 'error');
+      return;
+    }
     socketRef.current = ws;
 
     ws.onopen = () => {
       setIsUploading(true);
       setIsPaused(false);
+      pausedRef.current = false;
       startTimeRef.current = Date.now();
       transferredBytesRef.current = 0;
       setSessionStatus('Uploading...');
@@ -123,9 +205,9 @@ export default function WebSocketUploader({ onAuditTrigger, authToken, onNotify 
       const initializeSession = () => ws.send(JSON.stringify({
         type: 'INIT_SESSION',
         payload: {
-          sessionId: `session_${Date.now()}`,
+          sessionId: sessionIdRef.current,
           sourcePath: 'browser-selection',
-          files: manifestRef.current.files.map(({ file, ...fileItem }) => fileItem)
+          files: serializeManifest(manifestRef.current.files)
         }
       }));
 
@@ -140,12 +222,38 @@ export default function WebSocketUploader({ onAuditTrigger, authToken, onNotify 
       try {
         const msg = JSON.parse(e.data);
         handleMessage(msg);
-      } catch (err) {}
+      } catch (err) {
+        onNotify?.('Received an invalid message from the upload server.', 'error');
+      }
     };
 
     ws.onerror = () => {
       setSessionStatus('Connection Error');
     };
+
+    ws.onclose = () => {
+      if (socketRef.current !== ws) return;
+      socketRef.current = null;
+      if (auditRequestedRef.current && !stoppingRef.current) {
+        auditRequestedRef.current = false;
+      }
+      if (!stoppingRef.current && !pausedRef.current && manifestRef.current) {
+        scheduleReconnect();
+      }
+    };
+  };
+
+  const scheduleReconnect = () => {
+    if (reconnectTimerRef.current || stoppingRef.current || pausedRef.current) return;
+    const delay = Math.min(30_000, 1_000 * (2 ** Math.min(reconnectAttemptsRef.current, 5)));
+    reconnectAttemptsRef.current += 1;
+    const retryMessage = `Connection lost; retrying in ${Math.ceil(delay / 1000)}s...`;
+    setSessionStatus(retryMessage);
+    onNotify?.(retryMessage, 'warning');
+    reconnectTimerRef.current = window.setTimeout(() => {
+      reconnectTimerRef.current = null;
+      startUpload();
+    }, delay);
   };
 
   const handleMessage = (msg) => {
@@ -164,7 +272,8 @@ export default function WebSocketUploader({ onAuditTrigger, authToken, onNotify 
             hashAlgorithm: sf ? sf.hashAlgorithm || f.hashAlgorithm : f.hashAlgorithm,
             hash: sf ? sf.hash || f.hash : f.hash,
             offset: sf ? sf.offset || 0 : 0,
-            status: sf ? sf.status || 'pending' : 'pending',
+            status: sf?.status === 'verified' ? 'verified' : 'pending',
+            match: sf?.status === 'verified',
             serverHash: sf ? sf.serverHash || sf.serverMd5 : null,
             serverMd5: sf ? sf.serverMd5 : null
           };
@@ -177,13 +286,15 @@ export default function WebSocketUploader({ onAuditTrigger, authToken, onNotify 
       socketRef.current?.send(JSON.stringify({
         type: 'INIT_SESSION',
         payload: {
-          sessionId: `session_${Date.now()}`,
+          sessionId: sessionIdRef.current,
           sourcePath: 'browser-selection',
-          files: manifestRef.current?.files.map(({ file, ...fileItem }) => fileItem) || []
+          files: manifestRef.current ? serializeManifest(manifestRef.current.files) : []
         }
       }));
     } else if (type === 'ERROR') {
+      stoppingRef.current = true;
       setIsUploading(false);
+      socketRef.current?.close();
       setSessionStatus(msg.message || 'Upload error');
       onNotify?.(msg.message || 'WebSocket upload error', 'error');
     } else if (type === 'FILE_STARTED') {
@@ -211,11 +322,13 @@ export default function WebSocketUploader({ onAuditTrigger, authToken, onNotify 
         sendChunk(relativePath, offset);
       }
     } else if (type === 'FILE_VERIFIED') {
+      retryCountsRef.current[payload.relativePath] = 0;
       const updated = {
         ...manifestRef.current,
         files: manifestRef.current.files.map(f => f.relativePath === payload.relativePath ? {
           ...f,
           status: 'verified',
+          offset: f.size,
           serverHash: payload.serverHash || payload.serverMd5,
           serverMd5: payload.serverMd5,
           match: true
@@ -225,11 +338,15 @@ export default function WebSocketUploader({ onAuditTrigger, authToken, onNotify 
       setManifest(updated);
       uploadNextFile();
     } else if (type === 'FILE_ERROR') {
+      const relativePath = payload.relativePath;
+      const attempts = (retryCountsRef.current[relativePath] || 0) + 1;
+      retryCountsRef.current[relativePath] = attempts;
       const updated = {
         ...manifestRef.current,
-        files: manifestRef.current.files.map(f => f.relativePath === payload.relativePath ? {
+        files: manifestRef.current.files.map(f => f.relativePath === relativePath ? {
           ...f,
-          status: 'failed',
+          status: attempts >= MAX_FILE_RETRIES ? 'failed' : 'pending',
+          offset: attempts >= MAX_FILE_RETRIES ? f.offset : 0,
           serverHash: payload.serverHash || payload.serverMd5 || null,
           serverMd5: payload.serverMd5 || null,
           match: false
@@ -238,22 +355,40 @@ export default function WebSocketUploader({ onAuditTrigger, authToken, onNotify 
       manifestRef.current = updated;
       setManifest(updated);
       onNotify?.(payload.error || `Upload failed for ${payload.relativePath}`, 'error');
-      uploadNextFile();
+      if (attempts >= MAX_FILE_RETRIES) {
+        stoppingRef.current = true;
+        setIsUploading(false);
+        setSessionStatus(`Failed after ${MAX_FILE_RETRIES} attempts: ${relativePath}`);
+        socketRef.current?.close();
+      } else {
+        uploadNextFile();
+      }
     } else if (type === 'AUDIT_COMPLETE') {
+      auditRequestedRef.current = true;
+      stoppingRef.current = true;
       setIsUploading(false);
       setSessionStatus('Completed & Verified');
+      onNotify?.('Stateful upload completed and all files were verified.', 'success');
       if (onAuditTrigger) onAuditTrigger(payload);
+      socketRef.current?.close();
     }
   };
 
   const uploadNextFile = () => {
-    if (isPaused || !socketRef.current || socketRef.current.readyState !== WebSocket.OPEN) return;
+    if (pausedRef.current || !socketRef.current || socketRef.current.readyState !== WebSocket.OPEN) return;
 
     const currentManifest = manifestRef.current;
     if (!currentManifest) return;
+    if (currentManifest.files.some(f => f.status === 'failed')) {
+      setIsUploading(false);
+      setSessionStatus('Transfer stopped because one or more files failed');
+      return;
+    }
     const pending = currentManifest.files.find(f => f.status === 'pending' || f.status === 'uploading');
 
     if (!pending) {
+      if (auditRequestedRef.current) return;
+      auditRequestedRef.current = true;
       setSessionStatus('Running Server Hash Audit...');
       socketRef.current.send(JSON.stringify({ type: 'RUN_FULL_AUDIT' }));
       return;
@@ -279,7 +414,7 @@ export default function WebSocketUploader({ onAuditTrigger, authToken, onNotify 
   };
 
   const sendChunk = async (relativePath, offset) => {
-    if (!socketRef.current || isPaused) return;
+    if (!socketRef.current || pausedRef.current) return;
     const fileItem = manifestRef.current?.files.find(f => f.relativePath === relativePath);
     if (!fileItem || !fileItem.file) return;
 
@@ -299,7 +434,7 @@ export default function WebSocketUploader({ onAuditTrigger, authToken, onNotify 
       }
 
       const buffer = await fileItem.file.slice(offset, end).arrayBuffer();
-      if (isPaused || socketRef.current?.readyState !== WebSocket.OPEN) return;
+      if (pausedRef.current || socketRef.current?.readyState !== WebSocket.OPEN) return;
 
       socketRef.current.send(encodeBinaryChunk(relativePath, offset, buffer));
     } catch (error) {
@@ -348,8 +483,24 @@ export default function WebSocketUploader({ onAuditTrigger, authToken, onNotify 
   };
 
   const togglePause = () => {
-    setIsPaused(prev => !prev);
-    setSessionStatus(isPaused ? 'Uploading...' : 'Paused');
+    if (!manifestRef.current?.files?.length) {
+      onNotify?.('Select a file or directory before pausing or resuming an upload.', 'warning');
+      return;
+    }
+
+    if (!isUploading && !pausedRef.current) {
+      onNotify?.('There is no active upload to pause.', 'info');
+      return;
+    }
+
+    const nextPaused = !pausedRef.current;
+    pausedRef.current = nextPaused;
+    setIsPaused(nextPaused);
+    setSessionStatus(nextPaused ? 'Paused' : 'Uploading...');
+    if (!nextPaused) {
+      if (!socketRef.current || socketRef.current.readyState !== WebSocket.OPEN) startUpload();
+      else uploadNextFile();
+    }
   };
 
   const formatBytes = (bytes) => {
@@ -359,6 +510,16 @@ export default function WebSocketUploader({ onAuditTrigger, authToken, onNotify 
     const i = Math.floor(Math.log(bytes) / Math.log(k));
     return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
   };
+
+  const queuePageCount = Math.max(1, Math.ceil((manifest?.files?.length || 0) / QUEUE_PAGE_SIZE));
+  const visibleQueueFiles = manifest?.files?.slice(
+    (queuePage - 1) * QUEUE_PAGE_SIZE,
+    queuePage * QUEUE_PAGE_SIZE
+  ) || [];
+
+  useEffect(() => {
+    setQueuePage(currentPage => Math.min(currentPage, queuePageCount));
+  }, [queuePageCount]);
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '24px' }}>
@@ -392,8 +553,8 @@ export default function WebSocketUploader({ onAuditTrigger, authToken, onNotify 
               onChange={(event) => setHashAlgorithm(event.target.value)}
               disabled={isScanning || isUploading}
             >
+              <option value="sha256">SHA-256 (recommended)</option>
               <option value="md5">MD5 (legacy compatible)</option>
-              <option value="sha256">SHA-256</option>
             </select>
           </div>
         </div>
@@ -402,7 +563,7 @@ export default function WebSocketUploader({ onAuditTrigger, authToken, onNotify 
           <span className="status-chip neutral">
             {isScanning ? `Hashing selected files with ${hashAlgorithm.toUpperCase()}...` : 'Select files above to generate hashes'}
           </span>
-          <button className="btn btn-primary" onClick={startUpload} disabled={!manifest || isUploading && !isPaused}>
+          <button className="btn btn-primary" onClick={startUpload} disabled={isUploading && !isPaused}>
             <Play size={16} /> {isPaused ? 'Resume Upload' : 'Start / Resume Stateful Upload'}
           </button>
           {isUploading && (
@@ -416,7 +577,7 @@ export default function WebSocketUploader({ onAuditTrigger, authToken, onNotify 
       <div className="card">
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
           <h3>Live Transfer Dashboard</h3>
-          <span className={`status-chip ${sessionStatus.includes('Completed') ? 'success' : sessionStatus.includes('Uploading') ? 'warning' : 'neutral'}`}>
+          <span className={`status-chip ${sessionStatus.includes('Completed') ? 'success' : sessionStatus.includes('Uploading') || sessionStatus.includes('Running') ? 'warning' : sessionStatus.includes('Error') || sessionStatus.includes('Failed') || sessionStatus.includes('stopped') ? 'danger' : 'neutral'}`}>
             {sessionStatus}
           </span>
         </div>
@@ -478,7 +639,7 @@ export default function WebSocketUploader({ onAuditTrigger, authToken, onNotify 
               </tr>
             </thead>
             <tbody>
-              {manifest && manifest.files ? manifest.files.map(f => (
+              {manifest && manifest.files ? visibleQueueFiles.map(f => (
                 <tr key={f.relativePath}>
                   <td><strong>{f.relativePath}</strong></td>
                   <td>{formatBytes(f.size)}</td>
@@ -495,12 +656,23 @@ export default function WebSocketUploader({ onAuditTrigger, authToken, onNotify 
                 </tr>
               )) : (
                 <tr>
-                  <td colSpan="6" style={{ textAlign: 'center', color: '#94a3b8' }}>Click "Scan & Generate Hashes" to load target directory files.</td>
+                  <td colSpan="6" style={{ textAlign: 'center', color: '#94a3b8' }}>Select files or a directory above to build the upload queue.</td>
                 </tr>
               )}
             </tbody>
           </table>
         </div>
+        {queuePageCount > 1 && (
+          <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', gap: '12px', marginTop: '12px' }}>
+            <button className="btn btn-secondary" disabled={queuePage <= 1} onClick={() => setQueuePage(current => current - 1)}>
+              Previous
+            </button>
+            <span style={{ color: '#94a3b8' }}>Page {queuePage} of {queuePageCount}</span>
+            <button className="btn btn-secondary" disabled={queuePage >= queuePageCount} onClick={() => setQueuePage(current => current + 1)}>
+              Next
+            </button>
+          </div>
+        )}
       </div>
     </div>
   );

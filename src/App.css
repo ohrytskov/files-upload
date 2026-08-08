@@ -666,14 +666,59 @@ body {
   max-width: min(360px, calc(100vw - 48px));
   padding: 12px 16px;
   border-radius: var(--radius-sm);
-  border: 1px solid rgba(52, 211, 153, 0.35);
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  border: 1px solid transparent;
+  box-shadow: 0 12px 30px rgba(0, 0, 0, 0.35);
+}
+
+.toast-success {
+  border-color: rgba(52, 211, 153, 0.35);
   background: #122a28;
   color: #a7f3d0;
-  box-shadow: 0 12px 30px rgba(0, 0, 0, 0.35);
+}
+
+.toast-info {
+  border-color: rgba(56, 189, 248, 0.4);
+  background: #102b3a;
+  color: #bae6fd;
+}
+
+.toast-warning {
+  border-color: rgba(251, 191, 36, 0.4);
+  background: #3a2b12;
+  color: #fde68a;
 }
 
 .toast-error {
   border-color: rgba(248, 113, 113, 0.35);
   background: #351c25;
   color: #fecaca;
+}
+
+.toast-dismiss {
+  flex: 0 0 auto;
+  margin: -2px -6px 0 0;
+  padding: 0 4px;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font-size: 1.15rem;
+  line-height: 1;
+  cursor: pointer;
+  opacity: 0.75;
+}
+
+.toast-dismiss:hover {
+  opacity: 1;
+}
+
+.empty-state {
+  padding: 40px 20px;
+  border: 1px dashed var(--border-color);
+  border-radius: var(--radius-md);
+  background: rgba(148, 163, 184, 0.05);
+  color: var(--text-muted);
+  text-align: center;
 }

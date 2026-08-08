@@ -1,11 +1,18 @@
-import React, { useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { Search, Grid, List, UploadCloud, Link as LinkIcon, Edit2, Download, Trash2, FileText, Image as ImageIcon, Code, Music, Video, Archive, File } from 'lucide-react';
+import { REPOSITORY_PAGE_SIZE } from '../config';
 
 export default function FileRepository({ files, onRefresh, onPreview, onRename, onDelete, onUploadFiles, onNotify }) {
   const [search, setSearch] = useState('');
   const [sort, setSort] = useState('date-desc');
   const [viewMode, setViewMode] = useState('grid');
   const [isDragOver, setIsDragOver] = useState(false);
+  const [page, setPage] = useState(1);
+  const PAGE_SIZE = REPOSITORY_PAGE_SIZE;
+
+function getDisplayedHash(file) {
+  return file.hash || file.md5 || null;
+}
 
   const getCategoryIcon = (cat) => {
     switch (cat) {
@@ -27,12 +34,14 @@ export default function FileRepository({ files, onRefresh, onPreview, onRename, 
     return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
   };
 
-  const filteredFiles = files
+  const filteredFiles = useMemo(() => files
     .filter(f => {
       if (!search) return true;
       const q = search.toLowerCase();
-      return f.name.toLowerCase().includes(q) || (f.md5 && f.md5.toLowerCase().includes(q));
+      const hash = getDisplayedHash(f);
+      return f.name.toLowerCase().includes(q) || (hash && hash.toLowerCase().includes(q));
     })
+    .slice()
     .sort((a, b) => {
       if (sort === 'date-desc') return new Date(b.modifiedAt) - new Date(a.modifiedAt);
       if (sort === 'date-asc') return new Date(a.modifiedAt) - new Date(b.modifiedAt);
@@ -40,11 +49,24 @@ export default function FileRepository({ files, onRefresh, onPreview, onRename, 
       if (sort === 'size-desc') return b.size - a.size;
       if (sort === 'size-asc') return a.size - b.size;
       return 0;
-    });
+    }), [files, search, sort]);
+
+  const pageCount = Math.max(1, Math.ceil(filteredFiles.length / PAGE_SIZE));
+  const visibleFiles = filteredFiles.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
+
+  useEffect(() => {
+    setPage(1);
+  }, [search, sort]);
+
+  useEffect(() => {
+    setPage(currentPage => Math.min(currentPage, pageCount));
+  }, [pageCount]);
 
   const handleFileInputChange = (e) => {
     if (e.target.files && e.target.files.length > 0) {
       onUploadFiles(e.target.files);
+    } else {
+      onNotify?.('No files were selected for upload.', 'info');
     }
   };
 
@@ -53,6 +75,8 @@ export default function FileRepository({ files, onRefresh, onPreview, onRename, 
     setIsDragOver(false);
     if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
       onUploadFiles(e.dataTransfer.files);
+    } else {
+      onNotify?.('Drop one or more files to upload them.', 'warning');
     }
   };
 
@@ -61,9 +85,9 @@ export default function FileRepository({ files, onRefresh, onPreview, onRename, 
       <header className="top-bar">
         <div className="search-box">
           <Search size={18} color="#94a3b8" />
-          <input
-            type="text"
-            placeholder="Search files by name or MD5 checksum..."
+            <input
+              type="text"
+              placeholder="Search files by name or hash..."
             value={search}
             onChange={(e) => setSearch(e.target.value)}
           />
@@ -96,7 +120,7 @@ export default function FileRepository({ files, onRefresh, onPreview, onRename, 
           </select>
 
           <label className="btn btn-primary" style={{ cursor: 'pointer' }}>
-            <UploadCloud size={18} /> Quick Upload
+            <UploadCloud size={18} /> Quick Upload (small files)
             <input type="file" multiple hidden onChange={handleFileInputChange} />
           </label>
         </div>
@@ -127,7 +151,7 @@ export default function FileRepository({ files, onRefresh, onPreview, onRename, 
       </div>
 
       <div className={`files-container ${viewMode === 'grid' ? 'grid-layout' : 'list-layout'}`}>
-        {filteredFiles.map(file => (
+        {visibleFiles.map(file => (
           <div key={file.name} className="file-card">
             <div
               className="file-card-preview"
@@ -152,7 +176,7 @@ export default function FileRepository({ files, onRefresh, onPreview, onRename, 
               </div>
               <div className="file-card-meta" style={{ marginTop: '4px' }}>
                 <span>{formatBytes(file.size)}</span>
-                <code>{file.md5 ? file.md5.slice(0, 8) + '...' : 'No MD5'}</code>
+                <code>{getDisplayedHash(file) ? getDisplayedHash(file).slice(0, 8) + '...' : file.hashStatus === 'unknown' ? 'Not audited' : 'No hash'}</code>
               </div>
             </div>
 
@@ -166,7 +190,7 @@ export default function FileRepository({ files, onRefresh, onPreview, onRename, 
                     return;
                   }
                   navigator.clipboard.writeText(window.location.origin + file.url)
-                    .then(() => onNotify?.('Link copied!'))
+                    .then(() => onNotify?.('Link copied!', 'success'))
                     .catch(() => onNotify?.('Could not copy link', 'error'));
                 }}
               >
@@ -185,6 +209,26 @@ export default function FileRepository({ files, onRefresh, onPreview, onRename, 
           </div>
         ))}
       </div>
+
+      {filteredFiles.length === 0 && (
+        <div className="empty-state">
+          {files.length === 0
+            ? 'No files are stored yet. Use Quick Upload or drag files here to get started.'
+            : `No files match “${search}”. Try a different name or hash.`}
+        </div>
+      )}
+
+      {filteredFiles.length > PAGE_SIZE && (
+        <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', gap: '12px' }}>
+          <button className="btn btn-secondary" disabled={page <= 1} onClick={() => setPage(current => current - 1)}>
+            Previous
+          </button>
+          <span style={{ color: '#94a3b8' }}>Page {page} of {pageCount}</span>
+          <button className="btn btn-secondary" disabled={page >= pageCount} onClick={() => setPage(current => current + 1)}>
+            Next
+          </button>
+        </div>
+      )}
     </div>
   );
 }

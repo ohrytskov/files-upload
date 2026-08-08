@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { X } from 'lucide-react';
 
-export default function RenameModal({ file, onClose, onSave }) {
+export default function RenameModal({ file, onClose, onSave, onNotify }) {
   const [newName, setNewName] = useState('');
 
   useEffect(() => {
@@ -12,11 +12,18 @@ export default function RenameModal({ file, onClose, onSave }) {
 
   const handleSubmit = (e) => {
     e.preventDefault();
-    if (newName.trim() && newName.trim() !== file.name) {
-      onSave(file.name, newName.trim());
-    } else {
-      onClose();
+    const trimmedName = newName.trim();
+    if (!trimmedName) {
+      onNotify?.('Enter a new file name before saving.', 'warning');
+      return;
     }
+
+    if (trimmedName === file.name) {
+      onNotify?.('No rename changes were made.', 'info');
+      return;
+    }
+
+    onSave(file.name, trimmedName);
   };
 
   return (

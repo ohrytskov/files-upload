@@ -1,10 +1,11 @@
 import React from 'react';
 import { Folder, UploadCloud, ShieldCheck, Cloud, KeyRound } from 'lucide-react';
+import { STORAGE_DISPLAY_LIMIT_MB } from '../config';
 
 export default function Sidebar({ activeTab, setActiveTab, stats, authToken, onAuthTokenChange }) {
   const usedMB = stats ? (stats.totalSize / (1024 * 1024)).toFixed(2) : 0;
-  const maxMB = 100;
-  const pct = Math.min(100, Math.round((usedMB / maxMB) * 100));
+  const maxMB = STORAGE_DISPLAY_LIMIT_MB;
+  const pct = maxMB > 0 ? Math.min(100, Math.round((usedMB / maxMB) * 100)) : 0;
 
   return (
     <aside className="sidebar">
@@ -15,7 +16,7 @@ export default function Sidebar({ activeTab, setActiveTab, stats, authToken, onA
           </div>
           <div className="brand-text">
             <h2>CloudVault</h2>
-            <span className="badge">React + Vite + MD5</span>
+            <span className="badge">React + Vite + SHA-256</span>
           </div>
         </div>
 
@@ -36,7 +37,7 @@ export default function Sidebar({ activeTab, setActiveTab, stats, authToken, onA
             className={`nav-item ${activeTab === 'hash-audit' ? 'active' : ''}`}
             onClick={() => setActiveTab('hash-audit')}
           >
-            <ShieldCheck size={18} /> MD5 Audit Report
+            <ShieldCheck size={18} /> Hash Audit Report
           </button>
         </nav>
       </div>
@@ -51,7 +52,7 @@ export default function Sidebar({ activeTab, setActiveTab, stats, authToken, onA
         </div>
         <div className="storage-meta">
           <span>{usedMB} MB used</span>
-          <span>100 MB Limit</span>
+          <span>{maxMB > 0 ? `${maxMB} MB Limit` : 'No configured limit'}</span>
         </div>
         <label className="auth-token-field">
           <span><KeyRound size={14} /> API token</span>
