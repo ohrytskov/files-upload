@@ -1,4 +1,6 @@
-# CloudVault `files-upload` — Code Review
+# CloudVault `files-upload` — Historical Code Review
+
+> This document describes the repository as reviewed on 2026-08-02 and is retained for history. It is superseded by the current implementation and verification results on `main`; the previously listed path-traversal, arbitrary-scan, dummy-browser-chunk, resume-offset, missing-auth, legacy-frontend, and per-chunk-state-write findings have since been addressed.
 
 > Review date: 2026-08-02 · Repo: `/var/www/hello/my/files-area/files-upload`
 

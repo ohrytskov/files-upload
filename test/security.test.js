@@ -4,6 +4,7 @@ const assert = require('node:assert/strict');
 const {
   createAuthMiddleware,
   createRateLimiter,
+  getCookieToken,
   tokensMatch
 } = require('../lib/security');
 
@@ -41,6 +42,21 @@ test('token comparison and bearer authentication work', () => {
   auth.middleware(request, response, () => { called = true; });
   assert.equal(called, true);
   assert.equal(response.statusCode, 200);
+  assert.match(response.headers['Set-Cookie'], /HttpOnly/);
+});
+
+test('authentication accepts the browser session cookie', () => {
+  const auth = createAuthMiddleware('secret');
+  const request = {
+    headers: { cookie: 'cloudvault_token=secret' },
+    get: () => ''
+  };
+  const response = responseDouble();
+  let called = false;
+
+  auth.middleware(request, response, () => { called = true; });
+  assert.equal(called, true);
+  assert.equal(getCookieToken(request), 'secret');
 });
 test('invalid authentication is rejected', () => {
   const auth = createAuthMiddleware('secret');

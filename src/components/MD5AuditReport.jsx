@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import { useEffect, useState } from 'react';
 import {
   AlertCircle,
   CheckCircle2,
@@ -218,7 +218,13 @@ export default function MD5AuditReport({ onNotify }) {
         results
       });
       setProgress(`Compared ${results.length} file(s) using ${algorithm.toUpperCase()}`);
-      onNotify?.(`Audit completed: ${results.length} path(s) compared using ${algorithm.toUpperCase()}.`, 'success');
+      const issueCount = mismatchCount + missingCount + serverOnlyCount;
+      onNotify?.(
+        issueCount === 0
+          ? `Audit completed: ${results.length} path(s) matched using ${algorithm.toUpperCase()}.`
+          : `Audit completed with ${issueCount} issue(s): ${mismatchCount} mismatch(es), ${missingCount} missing, ${serverOnlyCount} server-only.`,
+        issueCount === 0 ? 'success' : 'warning'
+      );
     } catch (error) {
       setProgress('');
       onNotify?.(error.message || 'Directory audit failed', 'error');

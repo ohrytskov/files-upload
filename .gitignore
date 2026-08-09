@@ -1,6 +1,8 @@
 node_modules/
 state.json
 *.tmp
+*.cloudvault-part
+*.cloudvault-http-part
 uploads/server_state.json
 uploads/cloudvault.sqlite*
 .env

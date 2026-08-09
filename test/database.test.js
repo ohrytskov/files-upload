@@ -106,3 +106,33 @@ test('SQLite imports a legacy JSON state file once', () => {
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
+
+test('SQLite rename replaces stale metadata at an unused destination', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'files-upload-database-rename-'));
+  const databasePath = path.join(root, 'cloudvault.sqlite');
+
+  try {
+    const database = new CloudVaultDatabase(databasePath);
+    database.upsertRepositoryFile({
+      relativePath: 'source.txt',
+      size: 3,
+      hash: 'a'.repeat(64),
+      hashAlgorithm: 'sha256',
+      hashStatus: 'verified'
+    });
+    database.upsertRepositoryFile({
+      relativePath: 'stale-target.txt',
+      size: 4,
+      hash: 'b'.repeat(64),
+      hashAlgorithm: 'sha256',
+      hashStatus: 'verified'
+    });
+
+    database.renameRepositoryFile('source.txt', 'stale-target.txt');
+    assert.equal(database.getRepositoryFile('source.txt'), null);
+    assert.equal(database.getRepositoryFile('stale-target.txt').hash, 'a'.repeat(64));
+    database.close();
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});

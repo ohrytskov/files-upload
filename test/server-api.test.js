@@ -36,9 +36,9 @@ function waitForServer(child) {
 }
 
 async function stopServer(child) {
-  if (child.exitCode !== null) return;
+  if (child.exitCode !== null) return { code: child.exitCode, signal: null };
   child.kill('SIGTERM');
-  await new Promise(resolve => child.once('exit', resolve));
+  return new Promise(resolve => child.once('exit', (code, signal) => resolve({ code, signal })));
 }
 
 function getFreePort() {
@@ -68,6 +68,7 @@ test('HTTP API loads configured storage and protects hash scan endpoints', async
       HOST: '127.0.0.1',
       UPLOADS_DIR: root,
       HASH_SCAN_ROOT: root,
+      STATE_DB_PATH: path.join(root, 'private.sqlite'),
       CLOUDVAULT_AUTH_TOKEN: token
     },
     stdio: ['ignore', 'pipe', 'pipe']
@@ -81,6 +82,15 @@ test('HTTP API loads configured storage and protects hash scan endpoints', async
     assert.equal(unauthorized.status, 401);
 
     const headers = { Authorization: `Bearer ${token}` };
+    const unauthorizedDownload = await fetch(`${baseUrl}/uploads/server.txt`);
+    assert.equal(unauthorizedDownload.status, 401);
+
+    const authorizedDownload = await fetch(`${baseUrl}/uploads/server.txt`, { headers });
+    assert.equal(authorizedDownload.status, 200);
+    assert.equal(await authorizedDownload.text(), fileContent.toString());
+    const privateDatabaseDownload = await fetch(`${baseUrl}/uploads/private.sqlite`, { headers });
+    assert.equal(privateDatabaseDownload.status, 404);
+
     const directoriesResponse = await fetch(`${baseUrl}/api/hash/directories`, { headers });
     assert.equal(directoriesResponse.status, 200);
     const directories = await directoriesResponse.json();
@@ -115,6 +125,30 @@ test('HTTP API loads configured storage and protects hash scan endpoints', async
     assert.equal(upload.files[0].hashAlgorithm, 'sha256');
     assert.equal(upload.files[0].hash, uploadHash);
 
+    const concurrentContent = Buffer.from('concurrent upload content');
+    const concurrentHash = crypto.createHash('sha256').update(concurrentContent).digest('hex');
+    const concurrentResponses = await Promise.all([0, 1].map(async () => {
+      const concurrentForm = new FormData();
+      concurrentForm.append('algorithm', 'sha256');
+      concurrentForm.append('clientHashes', JSON.stringify([concurrentHash]));
+      concurrentForm.append('files', new Blob([concurrentContent]), 'same-name.txt');
+      return fetch(`${baseUrl}/api/upload`, {
+        method: 'POST',
+        headers,
+        body: concurrentForm
+      });
+    }));
+    const concurrentUploads = await Promise.all(concurrentResponses.map(async response => {
+      assert.equal(response.status, 200);
+      return response.json();
+    }));
+    const concurrentNames = concurrentUploads.map(result => result.files[0].name);
+    assert.equal(new Set(concurrentNames).size, 2);
+    assert.deepEqual(
+      concurrentNames.map(name => fs.readFileSync(path.join(root, name))).map(value => value.toString()),
+      [concurrentContent.toString(), concurrentContent.toString()]
+    );
+
     const renameResponse = await fetch(`${baseUrl}/api/files/${encodeURIComponent('http-upload.txt')}`, {
       method: 'PATCH',
       headers: { ...headers, 'Content-Type': 'application/json' },
@@ -147,7 +181,8 @@ test('HTTP API loads configured storage and protects hash scan endpoints', async
     });
     assert.equal(traversalResponse.status, 403);
   } finally {
-    await stopServer(child);
+    const stopped = await stopServer(child);
+    assert.equal(stopped.code, 0);
     fs.rmSync(root, { recursive: true, force: true });
   }
 });

@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { X, Download, File } from 'lucide-react';
 import { apiFetch } from '../utils/api';
 import { TEXT_PREVIEW_MAX_BYTES } from '../config';
@@ -56,8 +56,8 @@ export default function PreviewModal({ file, onClose, onNotify }) {
   const formatBytes = (bytes) => {
     if (!bytes) return '0 Bytes';
     const k = 1024;
-    const sizes = ['Bytes', 'KB', 'MB', 'GB'];
-    const i = Math.floor(Math.log(bytes) / Math.log(k));
+    const sizes = ['Bytes', 'KB', 'MB', 'GB', 'TB'];
+    const i = Math.min(Math.floor(Math.log(bytes) / Math.log(k)), sizes.length - 1);
     return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
   };
 

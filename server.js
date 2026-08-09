@@ -1,6 +1,7 @@
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 const express = require('express');
 const multer = require('multer');
 
@@ -8,12 +9,18 @@ const config = require('./lib/config');
 const { initWebSocketServer, calculateServerHash, calculateServerMd5 } = require('./lib/ws-server');
 const { generateHashes, normalizeHashAlgorithm } = require('./lib/hash-generator');
 const { isInternalUploadFile, normalizeFilename, normalizeRelativePath, resolveSafePath } = require('./lib/path-utils');
-const { createAuthMiddleware, createRateLimiter, normalizeToken } = require('./lib/security');
+const {
+  clearAuthCookie,
+  createAuthMiddleware,
+  createRateLimiter,
+  normalizeToken
+} = require('./lib/security');
 
 const app = express();
 const PORT = config.port;
 const UPLOADS_DIR = config.uploadsDir;
 const HASH_SCAN_ROOT = config.hashScanRoot;
+const STATE_DB_PATH = path.resolve(config.stateDbPath);
 const AUTH_TOKEN = normalizeToken(config.authToken);
 const md5Cache = new Map();
 let serverStateManager = null;
@@ -25,6 +32,16 @@ const ACTIVE_UPLOAD_EXTENSIONS = new Set([
 
 function isLoopbackHost(host) {
   return host === '127.0.0.1' || host === '::1' || host === 'localhost';
+}
+
+function isInternalStoragePath(filePath) {
+  const resolved = path.resolve(filePath);
+  return isInternalUploadFile(path.basename(resolved)) || [
+    STATE_DB_PATH,
+    `${STATE_DB_PATH}-wal`,
+    `${STATE_DB_PATH}-shm`,
+    `${STATE_DB_PATH}-journal`
+  ].includes(resolved);
 }
 
 if (!AUTH_TOKEN && !isLoopbackHost(config.host)) {
@@ -41,29 +58,9 @@ const storage = multer.diskStorage({
   destination: (req, file, cb) => {
     cb(null, UPLOADS_DIR);
   },
-  filename: (req, file, cb) => {
-    let originalName;
-    try {
-      originalName = normalizeFilename(path.basename(file.originalname.replace(/\\/g, '/')));
-      if (isInternalUploadFile(originalName)) {
-        return cb(new Error('Reserved upload filename'));
-      }
-    } catch (err) {
-      return cb(new Error('Invalid upload filename'));
-    }
-
-    const ext = path.extname(originalName);
-    const baseName = path.basename(originalName, ext);
-    let finalName = originalName;
-    
-    let counter = 1;
-    while (fs.existsSync(path.join(UPLOADS_DIR, finalName))) {
-      finalName = `${baseName}_${counter}${ext}`;
-      counter++;
-    }
-    
-    cb(null, finalName);
-  }
+  // Do not choose the user-visible name until the upload is complete. The
+  // final name is reserved atomically in finalizeHttpUploads().
+  filename: (req, file, cb) => cb(null, `.${crypto.randomUUID()}.cloudvault-http-part`)
 });
 
 const upload = multer({
@@ -73,6 +70,66 @@ const upload = multer({
     files: config.httpUploadMaxFiles
   }
 });
+
+function reserveHttpUploadName(tempPath, originalName) {
+  let normalizedName;
+  try {
+    normalizedName = normalizeFilename(path.basename(originalName.replace(/\\/g, '/')));
+    if (isInternalUploadFile(normalizedName)) {
+      const error = new Error('Reserved upload filename');
+      error.code = 'RESERVED_UPLOAD_FILENAME';
+      throw error;
+    }
+  } catch (error) {
+    if (error.code === 'RESERVED_UPLOAD_FILENAME') throw error;
+    throw new Error('Invalid upload filename');
+  }
+
+  const ext = path.extname(normalizedName);
+  const baseName = path.basename(normalizedName, ext);
+  let counter = 0;
+
+  while (true) {
+    const candidate = counter === 0
+      ? normalizedName
+      : `${baseName}_${counter}${ext}`;
+    const candidatePath = path.join(UPLOADS_DIR, candidate);
+    if (isInternalStoragePath(candidatePath)) {
+      const error = new Error('Reserved upload filename');
+      error.code = 'RESERVED_UPLOAD_FILENAME';
+      throw error;
+    }
+
+    let reserved = false;
+    try {
+      // The temporary upload and final name are on the same filesystem. A
+      // hard-link reservation makes the collision check atomic and avoids
+      // rename-overwrite races between concurrent multipart requests.
+      fs.linkSync(tempPath, candidatePath);
+      reserved = true;
+      fs.unlinkSync(tempPath);
+      return candidate;
+    } catch (error) {
+      if (reserved) {
+        try { fs.unlinkSync(candidatePath); } catch (rollbackError) {}
+      }
+      if (error.code === 'EEXIST') {
+        counter += 1;
+        continue;
+      }
+      throw error;
+    }
+  }
+}
+
+function finalizeHttpUploads(files = []) {
+  for (const file of files) {
+    const tempPath = file.path || path.join(UPLOADS_DIR, file.filename);
+    const finalName = reserveHttpUploadName(tempPath, file.originalname || '');
+    file.filename = finalName;
+    file.path = path.join(UPLOADS_DIR, finalName);
+  }
+}
 
 function cleanupUploadedFiles(files = []) {
   for (const file of files) {
@@ -88,11 +145,19 @@ function handleHttpUpload(req, res, next) {
       const status = err.code === 'LIMIT_FILE_SIZE' || err.code === 'LIMIT_FILE_COUNT' ? 413 : 400;
       return res.status(status).json({ error: err.message || 'Invalid upload request' });
     }
+
+    try {
+      finalizeHttpUploads(req.files || []);
+    } catch (finalizeError) {
+      cleanupUploadedFiles(req.files);
+      return res.status(400).json({ error: finalizeError.message || 'Invalid upload filename' });
+    }
     next();
   });
 }
 
 app.use(express.json({ limit: config.jsonBodyLimit }));
+const auth = createAuthMiddleware(AUTH_TOKEN);
 const DIST_DIR = path.join(__dirname, 'dist');
 if (fs.existsSync(DIST_DIR)) {
   app.use(express.static(DIST_DIR));
@@ -100,12 +165,12 @@ if (fs.existsSync(DIST_DIR)) {
   console.warn(`[Server] ${DIST_DIR} is missing; run "npm run build" before starting the web UI.`);
   app.use(express.static(DIST_DIR));
 }
-app.use('/uploads', (req, res, next) => {
+app.use('/uploads', auth.middleware, (req, res, next) => {
   let relativePath;
   try {
     relativePath = decodeURIComponent(req.path).replace(/^\/+/, '');
-    resolveSafePath(UPLOADS_DIR, relativePath);
-    if (isInternalUploadFile(path.posix.basename(relativePath))) {
+    const safePath = resolveSafePath(UPLOADS_DIR, relativePath);
+    if (isInternalStoragePath(safePath.resolved)) {
       return res.status(404).end();
     }
     next();
@@ -125,7 +190,11 @@ app.use('/uploads', (req, res, next) => {
   }
 }));
 
-const auth = createAuthMiddleware(AUTH_TOKEN);
+app.post('/api/auth/logout', (req, res) => {
+  clearAuthCookie(res, req);
+  res.status(204).end();
+});
+
 app.use('/api', auth.middleware);
 
 const uploadRateLimit = createRateLimiter({
@@ -160,27 +229,36 @@ function encodeUploadUrl(relativePath) {
   return `/uploads/${relativePath.split('/').map(encodeURIComponent).join('/')}`;
 }
 
-function collectUploadFiles() {
+function yieldToEventLoop() {
+  return new Promise(resolve => setImmediate(resolve));
+}
+
+async function collectUploadFiles() {
   const files = [];
   const pending = [{ directory: UPLOADS_DIR, relativeDirectory: '' }];
+  let visitedEntries = 0;
 
   while (pending.length > 0) {
     const current = pending.pop();
-    const entries = fs.readdirSync(current.directory, { withFileTypes: true });
+    const entries = await fs.promises.readdir(current.directory, { withFileTypes: true });
 
     for (const entry of entries) {
+      visitedEntries += 1;
       if (isInternalUploadFile(entry.name)) continue;
       const relativePath = current.relativeDirectory
         ? `${current.relativeDirectory}/${entry.name}`
         : entry.name;
       const filePath = path.join(current.directory, entry.name);
 
+      if (isInternalStoragePath(filePath)) continue;
       if (entry.isDirectory()) {
         pending.push({ directory: filePath, relativeDirectory: relativePath });
       } else if (entry.isFile()) {
-        const stats = fs.lstatSync(filePath);
+        const stats = await fs.promises.lstat(filePath);
         if (!stats.isSymbolicLink()) files.push({ relativePath, filePath, stats });
       }
+
+      if (visitedEntries % 128 === 0) await yieldToEventLoop();
     }
   }
 
@@ -189,17 +267,31 @@ function collectUploadFiles() {
 
 function resolveUploadFile(relativePath) {
   const normalized = normalizeRelativePath(relativePath);
-  if (isInternalUploadFile(path.posix.basename(normalized))) {
+  const safePath = resolveSafePath(UPLOADS_DIR, normalized);
+  if (isInternalStoragePath(safePath.resolved)) {
     throw new Error('Internal upload files cannot be modified');
   }
   return {
     normalized,
-    resolved: resolveSafePath(UPLOADS_DIR, normalized).resolved
+    resolved: safePath.resolved
   };
 }
 
 function getPartPath(filePath) {
   return `${filePath}${PART_SUFFIX}`;
+}
+
+function moveFileNoReplace(oldPath, newPath) {
+  // fs.rename() replaces an existing destination on POSIX. A hard link is an
+  // exclusive destination reservation on the same filesystem, so the move
+  // cannot overwrite a file created after the caller's existence check.
+  fs.linkSync(oldPath, newPath);
+  try {
+    fs.unlinkSync(oldPath);
+  } catch (error) {
+    try { fs.unlinkSync(newPath); } catch (rollbackError) {}
+    throw error;
+  }
 }
 
 function getRegularFileStat(filePath) {
@@ -224,10 +316,11 @@ function movePartFile(oldPath, newPath) {
   const oldPartPath = getPartPath(oldPath);
   const newPartPath = getPartPath(newPath);
   const oldStat = getRegularFileStat(oldPartPath);
-  if (!oldStat) return;
+  if (!oldStat) return false;
   if (getRegularFileStat(newPartPath)) throw new Error('A staged upload already exists at the target name');
   fs.mkdirSync(path.dirname(newPartPath), { recursive: true });
-  fs.renameSync(oldPartPath, newPartPath);
+  moveFileNoReplace(oldPartPath, newPartPath);
+  return true;
 }
 
 function matchesRepositoryMetadata(record, stats) {
@@ -248,6 +341,15 @@ function matchesStateMetadata(record, stats) {
     Number(record.targetDev) === stats.dev;
 }
 
+function matchesFileFingerprint(record, stats) {
+  if (!record) return false;
+  return Number(record.size) === stats.size &&
+    Number(record.mtimeMs) === stats.mtimeMs &&
+    Number(record.ctimeMs) === stats.ctimeMs &&
+    Number(record.ino) === stats.ino &&
+    Number(record.dev) === stats.dev;
+}
+
 function resolveHashScanPath(sourcePath) {
   const root = path.resolve(HASH_SCAN_ROOT);
   const requested = sourcePath.trim().replace(/\\/g, '/');
@@ -264,32 +366,35 @@ function resolveHashScanPath(sourcePath) {
   return resolveSafePath(root, path.relative(root, candidate));
 }
 
-function collectHashDirectories() {
+async function collectHashDirectories() {
   const root = path.resolve(HASH_SCAN_ROOT);
-  const rootStat = fs.lstatSync(root);
+  const rootStat = await fs.promises.lstat(root);
   if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) {
     throw new Error('Hash scan root must be a real directory');
   }
 
   const directories = [{ value: '.', label: '.' }];
   const pending = [{ absolutePath: root, relativePath: '' }];
+  let visitedEntries = 0;
 
   while (pending.length > 0) {
     const current = pending.pop();
-    const entries = fs.readdirSync(current.absolutePath, { withFileTypes: true });
+    const entries = await fs.promises.readdir(current.absolutePath, { withFileTypes: true });
 
     for (const entry of entries) {
-      if (!entry.isDirectory()) continue;
-
-      const relativePath = current.relativePath
-        ? `${current.relativePath}/${entry.name}`
-        : entry.name;
-      const absolutePath = path.join(current.absolutePath, entry.name);
-      const entryStat = fs.lstatSync(absolutePath);
-      if (entryStat.isSymbolicLink() || !entryStat.isDirectory()) continue;
-
-      directories.push({ value: relativePath, label: relativePath });
-      pending.push({ absolutePath, relativePath });
+      visitedEntries += 1;
+      if (entry.isDirectory()) {
+        const relativePath = current.relativePath
+          ? `${current.relativePath}/${entry.name}`
+          : entry.name;
+        const absolutePath = path.join(current.absolutePath, entry.name);
+        const entryStat = await fs.promises.lstat(absolutePath);
+        if (!entryStat.isSymbolicLink() && entryStat.isDirectory()) {
+          directories.push({ value: relativePath, label: relativePath });
+          pending.push({ absolutePath, relativePath });
+        }
+      }
+      if (visitedEntries % 128 === 0) await yieldToEventLoop();
     }
   }
 
@@ -300,12 +405,19 @@ function collectHashDirectories() {
 function getCachedServerMd5(filePath, stats) {
   const cacheKey = path.resolve(filePath);
   const cached = md5Cache.get(cacheKey);
-  if (cached && cached.size === stats.size && cached.mtimeMs === stats.mtimeMs) {
+  if (cached && matchesFileFingerprint(cached, stats)) {
     return cached.md5;
   }
 
   const pending = calculateServerMd5(filePath);
-  md5Cache.set(cacheKey, { size: stats.size, mtimeMs: stats.mtimeMs, md5: pending });
+  md5Cache.set(cacheKey, {
+    size: stats.size,
+    mtimeMs: stats.mtimeMs,
+    ctimeMs: stats.ctimeMs,
+    ino: stats.ino,
+    dev: stats.dev,
+    md5: pending
+  });
   pending.then(md5 => {
     const current = md5Cache.get(cacheKey);
     if (current && current.md5 === pending) current.md5 = md5;
@@ -324,7 +436,7 @@ function invalidateMd5Cache(...filePaths) {
 app.get('/api/files', async (req, res) => {
   try {
     const includeHash = ['1', 'true', 'yes'].includes(String(req.query.includeHash || '').toLowerCase());
-    const files = collectUploadFiles();
+    const files = await collectUploadFiles();
     const fileList = [];
 
     for (const file of files) {
@@ -497,9 +609,9 @@ app.post('/api/upload', uploadRateLimit, handleHttpUpload, async (req, res) => {
 });
 
 // 3. Storage statistics endpoint
-app.get('/api/stats', (req, res) => {
+app.get('/api/stats', async (req, res) => {
   try {
-    const files = collectUploadFiles();
+    const files = await collectUploadFiles();
     let totalSize = 0;
     let totalFiles = 0;
     const categories = {
@@ -605,22 +717,40 @@ app.patch('/api/files/:filename(*)', mutationRateLimit, (req, res) => {
     if (mkdirErr) {
       return res.status(500).json({ error: 'Failed to prepare rename destination' });
     }
-    fs.rename(oldPath, newPath, err => {
-      if (err) {
-        return res.status(500).json({ error: 'Failed to rename file' });
+    let finalMoved = false;
+    let partMoved = false;
+    try {
+      moveFileNoReplace(oldPath, newPath);
+      finalMoved = true;
+      partMoved = movePartFile(oldPath, newPath);
+    } catch (err) {
+      if (partMoved) {
+        try { moveFileNoReplace(getPartPath(newPath), getPartPath(oldPath)); } catch (rollbackError) {}
       }
-      try {
-        movePartFile(oldPath, newPath);
-        serverStateManager?.renameRepositoryFile(normalizedOldName, normalizedNewName);
-        serverStateManager?.renameTrackedFile(normalizedOldName, normalizedNewName);
-        serverStateManager?.flushSave();
-        invalidateMd5Cache(oldPath, newPath);
-        res.json({ message: 'File renamed successfully', oldName: normalizedOldName, newName: normalizedNewName });
-      } catch (renameError) {
-        try { fs.renameSync(newPath, oldPath); } catch (rollbackError) {}
-        return res.status(500).json({ error: 'Failed to finalize file rename' });
+      if (finalMoved) {
+        try { moveFileNoReplace(newPath, oldPath); } catch (rollbackError) {}
       }
-    });
+      if (err.code === 'EEXIST') {
+        return res.status(400).json({ error: 'File with target name already exists' });
+      }
+      return res.status(500).json({ error: 'Failed to rename file' });
+    }
+
+    try {
+      serverStateManager?.renameRepositoryFile(normalizedOldName, normalizedNewName);
+      serverStateManager?.renameTrackedFile(normalizedOldName, normalizedNewName);
+      serverStateManager?.flushSave();
+      invalidateMd5Cache(oldPath, newPath);
+      res.json({ message: 'File renamed successfully', oldName: normalizedOldName, newName: normalizedNewName });
+    } catch (renameError) {
+      if (partMoved) {
+        try { moveFileNoReplace(getPartPath(newPath), getPartPath(oldPath)); } catch (rollbackError) {}
+      }
+      if (finalMoved) {
+        try { moveFileNoReplace(newPath, oldPath); } catch (rollbackError) {}
+      }
+      return res.status(500).json({ error: 'Failed to finalize file rename' });
+    }
   });
 });
 
@@ -636,7 +766,7 @@ app.post('/api/hash/scan', uploadRateLimit, async (req, res) => {
     const safeOutputFile = outputFile
       ? resolveSafePath(HASH_SCAN_ROOT, outputFile).resolved
       : null;
-    if (safeOutputFile && isInternalUploadFile(path.basename(safeOutputFile))) {
+    if (safeOutputFile && isInternalStoragePath(safeOutputFile)) {
       throw new Error('Reserved output filename');
     }
 
@@ -644,7 +774,7 @@ app.post('/api/hash/scan', uploadRateLimit, async (req, res) => {
       sourcePath: source.resolved,
       outputFile: safeOutputFile,
       algorithm,
-      excludeFile: filePath => isInternalUploadFile(path.basename(filePath))
+      excludeFile: filePath => isInternalStoragePath(filePath)
     });
     // Absolute server paths are useful to the CLI but should not be returned
     // by an authenticated browser API. Keep the scan response portable and
@@ -660,11 +790,11 @@ app.post('/api/hash/scan', uploadRateLimit, async (req, res) => {
   }
 });
 
-app.get('/api/hash/directories', (req, res) => {
+app.get('/api/hash/directories', async (req, res) => {
   try {
     res.json({
       root: path.basename(HASH_SCAN_ROOT) || 'configured root',
-      directories: collectHashDirectories()
+      directories: await collectHashDirectories()
     });
   } catch (err) {
     res.status(500).json({ error: 'Failed to list configured hash directories' });
@@ -823,6 +953,7 @@ const { wss, stateManager } = initWebSocketServer(server, UPLOADS_DIR, {
   maxTotalBytes: config.wsMaxTotalBytes,
   maxManifestBytes: config.wsMaxManifestBytes,
   maxManifestFiles: config.wsMaxManifestFiles,
+  maxQueuedMessages: config.wsMaxQueuedMessages,
   authTimeoutMs: config.wsAuthTimeoutMs,
   syncEachChunk: config.wsSyncEachChunk,
   defaultHashAlgorithm: config.defaultHashAlgorithm,
@@ -831,6 +962,57 @@ const { wss, stateManager } = initWebSocketServer(server, UPLOADS_DIR, {
 serverStateManager = stateManager;
 
 const HOST = config.host;
+
+let shuttingDown = false;
+let shutdownFinished = false;
+let forceExitTimer = null;
+
+function finishShutdown(error = null) {
+  if (shutdownFinished) return;
+  shutdownFinished = true;
+  if (forceExitTimer) clearTimeout(forceExitTimer);
+
+  try {
+    serverStateManager?.close();
+  } catch (closeError) {
+    console.error('[Server] Failed to close persisted state:', closeError.message);
+    error = error || closeError;
+  }
+
+  if (error) {
+    console.error('[Server] Shutdown completed with an error:', error.message);
+    process.exitCode = 1;
+  }
+  process.exit();
+}
+
+function shutdown(signal) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  console.log(`[Server] Received ${signal}; stopping new work and flushing state...`);
+
+  try { serverStateManager?.flushSave(); } catch (error) {
+    console.error('[Server] Failed to flush state during shutdown:', error.message);
+  }
+
+  for (const client of wss.clients) {
+    try { client.close(1001, 'Server shutting down'); } catch (error) {}
+  }
+  try { wss.close(); } catch (error) {}
+  server.close(error => finishShutdown(error));
+  server.closeIdleConnections?.();
+
+  forceExitTimer = setTimeout(() => {
+    for (const client of wss.clients) {
+      try { client.terminate(); } catch (error) {}
+    }
+    server.closeAllConnections?.();
+    finishShutdown(new Error('Shutdown timed out'));
+  }, 10_000);
+}
+
+process.once('SIGINT', () => shutdown('SIGINT'));
+process.once('SIGTERM', () => shutdown('SIGTERM'));
 
 server.listen(PORT, HOST, () => {
   console.log(`🚀 Server running on http://${HOST}:${PORT}`);

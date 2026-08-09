@@ -1,11 +1,20 @@
-import React from 'react';
+import { useEffect, useState } from 'react';
 import { Folder, UploadCloud, ShieldCheck, Cloud, KeyRound } from 'lucide-react';
 import { STORAGE_DISPLAY_LIMIT_MB } from '../config';
 
 export default function Sidebar({ activeTab, setActiveTab, stats, authToken, onAuthTokenChange }) {
+  const [draftToken, setDraftToken] = useState(authToken);
   const usedMB = stats ? (stats.totalSize / (1024 * 1024)).toFixed(2) : 0;
   const maxMB = STORAGE_DISPLAY_LIMIT_MB;
   const pct = maxMB > 0 ? Math.min(100, Math.round((usedMB / maxMB) * 100)) : 0;
+
+  useEffect(() => {
+    setDraftToken(authToken);
+  }, [authToken]);
+
+  const commitToken = () => {
+    if (draftToken !== authToken) onAuthTokenChange(draftToken);
+  };
 
   return (
     <aside className="sidebar">
@@ -58,8 +67,15 @@ export default function Sidebar({ activeTab, setActiveTab, stats, authToken, onA
           <span><KeyRound size={14} /> API token</span>
           <input
             type="password"
-            value={authToken}
-            onChange={(event) => onAuthTokenChange(event.target.value)}
+            value={draftToken}
+            onChange={(event) => setDraftToken(event.target.value)}
+            onBlur={commitToken}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter') {
+                event.preventDefault();
+                event.currentTarget.blur();
+              }
+            }}
             placeholder="Optional"
             autoComplete="off"
           />

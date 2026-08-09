@@ -31,7 +31,8 @@ The server persists its state in SQLite. It prefers `better-sqlite3`; on Node.js
    - **Client Module** (`bin/upload-cli.js`, `lib/ws-client.js`, `src/components/WebSocketUploader.jsx`): CLI tool and interactive React dashboard.
 
 6. **Security and Transport Controls**:
-   - Optional bearer-token authentication for API and WebSocket control traffic via `CLOUDVAULT_AUTH_TOKEN`.
+   - Optional bearer-token authentication for API, WebSocket control traffic, and uploaded-file downloads via `CLOUDVAULT_AUTH_TOKEN`.
+   - Authenticated browser API requests establish a same-origin HttpOnly session cookie so image, media, preview, and download requests do not expose the token in URLs.
    - Request and WebSocket connection rate limits can be tuned with environment variables.
    - Upload chunks use binary WebSocket frames instead of base64-encoded JSON payloads.
 
@@ -46,21 +47,23 @@ npm run build
 npm start
 ```
 
-Server configuration is loaded from `.env`. The current default is:
+Server configuration is loaded from `.env`. The checked-in `.env.example` is a runnable loopback configuration. For a network deployment, change `HOST` and set a non-empty `CLOUDVAULT_AUTH_TOKEN` before starting.
+
+The default scan root is:
 ```dotenv
-HASH_SCAN_ROOT=/var/www/hello/my/files-area/files-upload/uploads
+HASH_SCAN_ROOT=./uploads
 ```
-Copy `.env.example` when setting up another installation and change the path as needed. Shell environment variables still take precedence over `.env`.
+Copy `.env.example` when setting up another installation and change the paths as needed. Shell environment variables still take precedence over `.env`.
 
 Server runs on:
 - Web Interface: `http://localhost:3000`
 - WebSocket Upload Endpoint: `ws://localhost:3000/ws/upload`
 
-To enable authentication, set `CLOUDVAULT_AUTH_TOKEN` before starting the server. Enter the same token in the dashboard API token field or pass it to the CLI with `--token`.
+To enable authentication, set `CLOUDVAULT_AUTH_TOKEN` before starting the server. Enter the same token in the dashboard API token field or pass it to the CLI with `--token`. When authentication is enabled, `/api`, `/ws/upload`, and `/uploads` require authentication; the dashboard obtains a browser session cookie through its authenticated API requests.
 
 ### Capacity and production notes
 
-The WebSocket uploader is the large-transfer path. It streams one bounded chunk at a time, writes to a hidden staging file, verifies the complete hash, and only then atomically publishes the final file. The default 4 MiB chunk size keeps transfer memory bounded; `WS_MAX_CHUNK_SIZE`, `WS_MAX_PAYLOAD`, `WS_MAX_MANIFEST_BYTES`, and `WS_MAX_MANIFEST_FILES` protect the server from oversized requests.
+The WebSocket uploader is the large-transfer path. It streams one bounded chunk at a time, writes to a hidden staging file, verifies the complete hash, and only then atomically publishes the final file. The default 4 MiB chunk size keeps transfer memory bounded; `WS_MAX_CHUNK_SIZE`, `WS_MAX_PAYLOAD`, `WS_MAX_MANIFEST_BYTES`, `WS_MAX_MANIFEST_FILES`, and `WS_MAX_QUEUED_MESSAGES` protect the server from oversized or backlogged requests.
 
 This is suitable for a single host handling thousands of files and multi-gigabyte batches when the host has sufficient disk, CPU, and network capacity. It is not yet a horizontally scalable object-storage service: one Node process permits one active WebSocket upload session, the active manifest remains in memory, and an audit rereads files when its cached verification metadata is unavailable or has changed. Upload state, repository hash metadata, and audit results are persisted in SQLite at `STATE_DB_PATH` (default: `uploads/cloudvault.sqlite`). For larger or concurrent workloads, use a database/object store and a resumable protocol behind a job/session service.
 
@@ -82,7 +85,16 @@ node bin/upload-cli.js -p "/var/www/hello/my/files-area" -o "hashes.txt"
 Open `http://localhost:3000` in your browser to access:
 - **File Repository**: View, preview, search, download, rename, or delete uploaded files with hash tags.
 - **WebSocket Batch Uploader**: Select local files/directories, choose MD5 or SHA-256, watch real-time speeds and progress bars, and pause/resume transfers.
+- The browser uploader persists session metadata locally; after a page reload, select the same files again to resume their server-side staged upload.
 - **Hash Audit Report**: Select a local directory and a configured server directory, then compare SHA-256 or MD5 hashes.
+
+### Validation
+
+```bash
+npm run lint
+npm test
+npm run build
+```
 
 ---
 

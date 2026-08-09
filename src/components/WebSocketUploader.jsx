@@ -1,7 +1,13 @@
-import React, { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Play, Pause, CheckCircle2, AlertCircle } from 'lucide-react';
 import { hashFile } from '../utils/md5';
 import { DEFAULT_HASH_ALGORITHM, MAX_FILE_RETRIES, UPLOAD_CHUNK_SIZE, UPLOAD_QUEUE_PAGE_SIZE } from '../config';
+import {
+  browserUploadSessionMatches,
+  clearBrowserUploadSession,
+  loadBrowserUploadSession,
+  saveBrowserUploadSession
+} from '../utils/browser-upload-session.mjs';
 
 const CHUNK_SIZE = UPLOAD_CHUNK_SIZE;
 
@@ -71,12 +77,18 @@ export default function WebSocketUploader({ onAuditTrigger, authToken, onNotify 
     manifestRef.current = manifest;
   }, [manifest]);
 
-  useEffect(() => () => {
-    stoppingRef.current = true;
-    if (reconnectTimerRef.current) window.clearTimeout(reconnectTimerRef.current);
-    reconnectTimerRef.current = null;
-    socketRef.current?.close();
-    socketRef.current = null;
+  useEffect(() => {
+    if (loadBrowserUploadSession()) {
+      setSessionStatus('Select the same files to resume the saved browser session');
+    }
+
+    return () => {
+      stoppingRef.current = true;
+      if (reconnectTimerRef.current) window.clearTimeout(reconnectTimerRef.current);
+      reconnectTimerRef.current = null;
+      socketRef.current?.close();
+      socketRef.current = null;
+    };
   }, []);
 
   const handleFilesSelected = async (event) => {
@@ -126,9 +138,13 @@ export default function WebSocketUploader({ onAuditTrigger, authToken, onNotify 
         totalBytes,
         files
       };
+      const savedSession = loadBrowserUploadSession();
+      const canResume = browserUploadSessionMatches(savedSession, files, hashAlgorithm);
+      const sessionId = canResume ? savedSession.sessionId : `browser_${Date.now()}`;
       manifestRef.current = data;
       setManifest(data);
-      sessionIdRef.current = `browser_${Date.now()}`;
+      sessionIdRef.current = sessionId;
+      saveBrowserUploadSession({ sessionId, hashAlgorithm, files });
       retryCountsRef.current = {};
       auditRequestedRef.current = false;
       lastOffsetsRef.current = {};
@@ -231,9 +247,16 @@ export default function WebSocketUploader({ onAuditTrigger, authToken, onNotify 
       setSessionStatus('Connection Error');
     };
 
-    ws.onclose = () => {
+    ws.onclose = (event) => {
       if (socketRef.current !== ws) return;
       socketRef.current = null;
+      if ([1002, 1003, 1007, 1008, 1009].includes(event.code)) {
+        stoppingRef.current = true;
+        setIsUploading(false);
+        setSessionStatus('Connection rejected by server');
+        onNotify?.(event.reason || `WebSocket closed with code ${event.code}.`, 'error');
+        return;
+      }
       if (auditRequestedRef.current && !stoppingRef.current) {
         auditRequestedRef.current = false;
       }
@@ -263,15 +286,21 @@ export default function WebSocketUploader({ onAuditTrigger, authToken, onNotify 
       const { files: serverFiles } = payload;
       const currentManifest = manifestRef.current;
       if (!currentManifest) return;
+      const nextOffsets = {};
       const updated = {
         ...currentManifest,
         files: currentManifest.files.map(f => {
           const sf = serverFiles[f.relativePath];
+          const rawOffset = Number(sf?.offset);
+          const offset = Number.isSafeInteger(rawOffset)
+            ? Math.min(Math.max(rawOffset, 0), f.size)
+            : 0;
+          nextOffsets[f.relativePath] = offset;
           return {
             ...f,
             hashAlgorithm: sf ? sf.hashAlgorithm || f.hashAlgorithm : f.hashAlgorithm,
             hash: sf ? sf.hash || f.hash : f.hash,
-            offset: sf ? sf.offset || 0 : 0,
+            offset,
             status: sf?.status === 'verified' ? 'verified' : 'pending',
             match: sf?.status === 'verified',
             serverHash: sf ? sf.serverHash || sf.serverMd5 : null,
@@ -279,6 +308,7 @@ export default function WebSocketUploader({ onAuditTrigger, authToken, onNotify 
           };
         })
       };
+      lastOffsetsRef.current = nextOffsets;
       manifestRef.current = updated;
       setManifest(updated);
       uploadNextFile();
@@ -364,11 +394,26 @@ export default function WebSocketUploader({ onAuditTrigger, authToken, onNotify 
         uploadNextFile();
       }
     } else if (type === 'AUDIT_COMPLETE') {
-      auditRequestedRef.current = true;
+      const matchCount = Number(payload?.matchCount) || 0;
+      const mismatchCount = Number(payload?.mismatchCount) || 0;
+      const missingCount = Number(payload?.missingCount) || 0;
+      const totalFiles = Number(payload?.totalFiles) || 0;
+      const expectedTotalFiles = manifestRef.current?.files?.length || 0;
+      const verified = mismatchCount === 0 && missingCount === 0 &&
+        totalFiles === expectedTotalFiles && matchCount === expectedTotalFiles;
+      if (verified) clearBrowserUploadSession();
+      auditRequestedRef.current = verified;
       stoppingRef.current = true;
       setIsUploading(false);
-      setSessionStatus('Completed & Verified');
-      onNotify?.('Stateful upload completed and all files were verified.', 'success');
+      setSessionStatus(verified
+        ? 'Completed & Verified'
+        : `Audit failed: ${mismatchCount} mismatch(es), ${missingCount} missing`);
+      onNotify?.(
+        verified
+          ? 'Stateful upload completed and all files were verified.'
+          : `Upload finished with ${mismatchCount} mismatch(es) and ${missingCount} missing file(s).`,
+        verified ? 'success' : 'error'
+      );
       if (onAuditTrigger) onAuditTrigger(payload);
       socketRef.current?.close();
     }
@@ -439,6 +484,10 @@ export default function WebSocketUploader({ onAuditTrigger, authToken, onNotify 
       socketRef.current.send(encodeBinaryChunk(relativePath, offset, buffer));
     } catch (error) {
       onNotify?.(`Failed to read ${relativePath}: ${error.message}`, 'error');
+      stoppingRef.current = true;
+      setIsUploading(false);
+      setSessionStatus(`Failed to read ${relativePath}`);
+      socketRef.current?.close();
     }
   };
 
@@ -463,8 +512,12 @@ export default function WebSocketUploader({ onAuditTrigger, authToken, onNotify 
         }
       }
 
-      const overallPct = Math.round((totalUploaded / currentManifest.totalBytes) * 100);
-      const filePct = activeFileObj ? Math.round((offset / activeFileObj.size) * 100) : 0;
+      const overallPct = currentManifest.totalBytes > 0
+        ? Math.round((totalUploaded / currentManifest.totalBytes) * 100)
+        : 100;
+      const filePct = activeFileObj
+        ? (activeFileObj.size > 0 ? Math.round((offset / activeFileObj.size) * 100) : 100)
+        : 0;
       const remainingBytes = currentManifest.totalBytes - totalUploaded;
       const etaSec = speedBps > 0 ? Math.ceil(remainingBytes / speedBps) : 0;
 
@@ -507,7 +560,7 @@ export default function WebSocketUploader({ onAuditTrigger, authToken, onNotify 
     if (!bytes) return '0 Bytes';
     const k = 1024;
     const sizes = ['Bytes', 'KB', 'MB', 'GB'];
-    const i = Math.floor(Math.log(bytes) / Math.log(k));
+    const i = Math.min(Math.floor(Math.log(bytes) / Math.log(k)), sizes.length - 1);
     return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
   };
 

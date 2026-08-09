@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import Sidebar from './components/Sidebar';
 import FileRepository from './components/FileRepository';
 import WebSocketUploader from './components/WebSocketUploader';
@@ -36,11 +36,6 @@ export default function App() {
     if (toastTimerRef.current) window.clearTimeout(toastTimerRef.current);
   }, []);
 
-  const handleAuthTokenChange = (token) => {
-    setAuthToken(token);
-    setAuthTokenState(token.trim());
-  };
-
   const fetchFiles = async () => {
     try {
       const res = await apiFetch('/api/files');
@@ -68,6 +63,19 @@ export default function App() {
     } catch (err) {
       console.error(err);
       notify('Could not load storage statistics', 'error');
+    }
+  };
+
+  const handleAuthTokenChange = (token) => {
+    const normalizedToken = token.trim();
+    setAuthToken(token);
+    setAuthTokenState(normalizedToken);
+
+    if (normalizedToken) {
+      fetchFiles();
+      fetchStats();
+    } else {
+      fetch('/api/auth/logout', { method: 'POST' }).catch(() => {});
     }
   };
 

@@ -1,6 +1,5 @@
 #!/usr/bin/env node
 
-const path = require('path');
 const config = require('../lib/config');
 const WebSocketUploaderClient = require('../lib/ws-client');
 
@@ -66,6 +65,7 @@ Examples:
     serverUrl: options.serverUrl,
     sourcePath: options.sourcePath,
     stateFilePath: options.stateFilePath,
+    outputFile: options.outputHashesFile,
     authToken: options.authToken,
     hashAlgorithm: options.hashAlgorithm,
     onProgress: (p) => {
@@ -90,6 +90,9 @@ Examples:
       }
     },
     onAuditComplete: (audit) => {
+      const expectedTotalFiles = client.stateManager.state?.totalFiles ?? 0;
+      const verified = audit.mismatchCount === 0 && audit.missingCount === 0 &&
+        audit.totalFiles === expectedTotalFiles && audit.matchCount === expectedTotalFiles;
       console.log('\n==================================================');
       console.log('  🎯 Full Verification Audit Summary');
       console.log(`  Total Files Processed: ${audit.totalFiles}`);
@@ -97,7 +100,7 @@ Examples:
       console.log(`  ⚠️ Mismatched Hashes: ${audit.mismatchCount}`);
       console.log(`  ❓ Missing on Server: ${audit.missingCount}`);
       console.log('==================================================\n');
-      process.exit(0);
+      process.exitCode = verified ? 0 : 1;
     },
     onError: (err, details = {}) => {
       if (details.recoverable) {

@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Search, Grid, List, UploadCloud, Link as LinkIcon, Edit2, Download, Trash2, FileText, Image as ImageIcon, Code, Music, Video, Archive, File } from 'lucide-react';
 import { REPOSITORY_PAGE_SIZE } from '../config';
 
@@ -30,7 +30,7 @@ function getDisplayedHash(file) {
     if (!bytes || bytes === 0) return '0 Bytes';
     const k = 1024;
     const sizes = ['Bytes', 'KB', 'MB', 'GB'];
-    const i = Math.floor(Math.log(bytes) / Math.log(k));
+    const i = Math.min(Math.floor(Math.log(bytes) / Math.log(k)), sizes.length - 1);
     return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
   };
 
@@ -134,7 +134,14 @@ function getDisplayedHash(file) {
           onDrop={handleDrop}
           onClick={() => document.getElementById('repo-file-input').click()}
         >
-          <input id="repo-file-input" type="file" multiple hidden onChange={handleFileInputChange} />
+          <input
+            id="repo-file-input"
+            type="file"
+            multiple
+            hidden
+            onClick={event => event.stopPropagation()}
+            onChange={handleFileInputChange}
+          />
           <div className="dropzone-icon">
             <UploadCloud size={48} />
           </div>

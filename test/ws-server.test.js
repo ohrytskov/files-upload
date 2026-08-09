@@ -177,6 +177,70 @@ test('WebSocket upload resumes a staged multi-chunk file without corrupting offs
   }
 });
 
+test('WebSocket replacement keeps the existing final file until verification', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'files-upload-ws-replace-'));
+  const oldContent = Buffer.from('old published content');
+  const newContent = Buffer.from('new published content');
+  const targetPath = path.join(root, 'replace.txt');
+  fs.writeFileSync(targetPath, oldContent);
+  const hash = crypto.createHash('sha256').update(newContent).digest('hex');
+  const server = http.createServer();
+  initWebSocketServer(server, root, {
+    authToken: 'replace-token',
+    maxPayload: 1024 * 1024,
+    maxChunkSize: 1024 * 1024,
+    maxManifestFiles: 10,
+    authTimeoutMs: 1000
+  });
+
+  let firstSocket;
+  let secondSocket;
+  try {
+    await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+    const port = server.address().port;
+    const manifest = {
+      sessionId: 'replace-session',
+      files: [{ relativePath: 'replace.txt', size: newContent.length, hashAlgorithm: 'sha256', hash }]
+    };
+
+    firstSocket = new WebSocket(`ws://127.0.0.1:${port}/ws/upload`);
+    await waitForOpen(firstSocket);
+    firstSocket.send(JSON.stringify({ type: 'AUTH', payload: { token: 'replace-token' } }));
+    assert.equal((await nextMessage(firstSocket)).type, 'AUTH_OK');
+    firstSocket.send(JSON.stringify({ type: 'INIT_SESSION', payload: manifest }));
+    const ready = await nextMessage(firstSocket);
+    assert.equal(ready.payload.files['replace.txt'].offset, 0);
+    assert.deepEqual(fs.readFileSync(targetPath), oldContent);
+
+    firstSocket.close();
+    await new Promise(resolve => firstSocket.once('close', resolve));
+    assert.deepEqual(fs.readFileSync(targetPath), oldContent);
+
+    secondSocket = new WebSocket(`ws://127.0.0.1:${port}/ws/upload`);
+    await waitForOpen(secondSocket);
+    secondSocket.send(JSON.stringify({ type: 'AUTH', payload: { token: 'replace-token' } }));
+    assert.equal((await nextMessage(secondSocket)).type, 'AUTH_OK');
+    secondSocket.send(JSON.stringify({ type: 'INIT_SESSION', payload: manifest }));
+    assert.equal((await nextMessage(secondSocket)).payload.files['replace.txt'].offset, 0);
+    secondSocket.send(JSON.stringify({ type: 'START_FILE', payload: { relativePath: 'replace.txt' } }));
+    assert.equal((await nextMessage(secondSocket)).type, 'FILE_STARTED');
+    secondSocket.send(encodeChunk({ relativePath: 'replace.txt', offset: 0, data: newContent }));
+    assert.equal((await nextMessage(secondSocket)).type, 'CHUNK_ACK');
+    secondSocket.send(JSON.stringify({
+      type: 'FINISH_FILE',
+      payload: { relativePath: 'replace.txt', clientHash: hash, hashAlgorithm: 'sha256' }
+    }));
+    assert.equal((await nextMessage(secondSocket)).type, 'FILE_VERIFIED');
+    assert.deepEqual(fs.readFileSync(targetPath), newContent);
+  } finally {
+    for (const socket of [firstSocket, secondSocket]) {
+      if (socket && socket.readyState === WebSocket.OPEN) socket.close();
+    }
+    await closeServer(server);
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('WebSocket upload rejects reserved internal filenames', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'files-upload-ws-reserved-'));
   const server = http.createServer();
@@ -199,6 +263,120 @@ test('WebSocket upload rejects reserved internal filenames', async () => {
     const error = await nextMessage(socket);
     assert.equal(error.type, 'ERROR');
     assert.match(error.message, /Reserved upload path/);
+  } finally {
+    if (socket && socket.readyState === WebSocket.OPEN) socket.close();
+    await closeServer(server);
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('WebSocket upload rejects file and directory path collisions', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'files-upload-ws-path-conflict-'));
+  const server = http.createServer();
+  initWebSocketServer(server, root, { authToken: 'path-token', authTimeoutMs: 1000 });
+  let socket;
+
+  try {
+    await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+    socket = new WebSocket(`ws://127.0.0.1:${server.address().port}/ws/upload`);
+    await waitForOpen(socket);
+    socket.send(JSON.stringify({ type: 'AUTH', payload: { token: 'path-token' } }));
+    assert.equal((await nextMessage(socket)).type, 'AUTH_OK');
+    socket.send(JSON.stringify({
+      type: 'INIT_SESSION',
+      payload: {
+        sessionId: 'path-conflict-session',
+        files: [
+          { relativePath: 'folder/file.txt', size: 0, hashAlgorithm: 'sha256', hash: '0'.repeat(64) },
+          { relativePath: 'folder', size: 0, hashAlgorithm: 'sha256', hash: '0'.repeat(64) }
+        ]
+      }
+    }));
+    const error = await nextMessage(socket);
+    assert.equal(error.type, 'ERROR');
+    assert.match(error.message, /conflicts with a directory path/);
+  } finally {
+    if (socket && socket.readyState === WebSocket.OPEN) socket.close();
+    await closeServer(server);
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('WebSocket upload protects a custom SQLite database inside the uploads directory', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'files-upload-ws-database-'));
+  const server = http.createServer();
+  initWebSocketServer(server, root, {
+    authToken: 'database-token',
+    databasePath: path.join(root, 'private.sqlite'),
+    authTimeoutMs: 1000
+  });
+  let socket;
+
+  try {
+    await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+    socket = new WebSocket(`ws://127.0.0.1:${server.address().port}/ws/upload`);
+    await waitForOpen(socket);
+    socket.send(JSON.stringify({ type: 'AUTH', payload: { token: 'database-token' } }));
+    assert.equal((await nextMessage(socket)).type, 'AUTH_OK');
+    socket.send(JSON.stringify({
+      type: 'INIT_SESSION',
+      payload: {
+        sessionId: 'database-session',
+        files: [{ relativePath: 'private.sqlite', size: 0, hashAlgorithm: 'sha256', hash: '0'.repeat(64) }]
+      }
+    }));
+    const error = await nextMessage(socket);
+    assert.equal(error.type, 'ERROR');
+    assert.match(error.message, /Reserved upload path/);
+  } finally {
+    if (socket && socket.readyState === WebSocket.OPEN) socket.close();
+    await closeServer(server);
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('WebSocket upload closes a client that exceeds the message queue limit', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'files-upload-ws-queue-'));
+  const existingContent = Buffer.alloc(2 * 1024 * 1024, 7);
+  const existingPath = path.join(root, 'queued.bin');
+  fs.writeFileSync(existingPath, existingContent);
+  const server = http.createServer();
+  initWebSocketServer(server, root, {
+    authToken: 'queue-token',
+    maxPayload: 4 * 1024 * 1024,
+    maxQueuedMessages: 1,
+    maxManifestFiles: 10,
+    authTimeoutMs: 1000
+  });
+  let socket;
+
+  try {
+    await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+    socket = new WebSocket(`ws://127.0.0.1:${server.address().port}/ws/upload`);
+    await waitForOpen(socket);
+    socket.send(JSON.stringify({ type: 'AUTH', payload: { token: 'queue-token' } }));
+    assert.equal((await nextMessage(socket)).type, 'AUTH_OK');
+
+    const manifest = {
+      sessionId: 'queue-session',
+      files: [{
+        relativePath: 'queued.bin',
+        size: existingContent.length,
+        hashAlgorithm: 'sha256',
+        hash: '0'.repeat(64)
+      }]
+    };
+    const closeCode = new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error('WebSocket queue limit did not close the client')), 5000);
+      socket.once('close', code => {
+        clearTimeout(timer);
+        resolve(code);
+      });
+    });
+
+    const message = JSON.stringify({ type: 'INIT_SESSION', payload: manifest });
+    for (let index = 0; index < 32; index += 1) socket.send(message);
+    assert.equal(await closeCode, 1008);
   } finally {
     if (socket && socket.readyState === WebSocket.OPEN) socket.close();
     await closeServer(server);

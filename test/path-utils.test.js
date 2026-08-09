@@ -13,7 +13,9 @@ const {
 
 test('internal state and staging filenames are reserved', () => {
   assert.equal(isInternalUploadFile('server_state.json'), true);
+  assert.equal(isInternalUploadFile('cloudvault.sqlite-journal'), true);
   assert.equal(isInternalUploadFile('nested.cloudvault-part'), true);
+  assert.equal(isInternalUploadFile('.abc.cloudvault-http-part'), true);
   assert.equal(isInternalUploadFile('user.json'), false);
 });
 
