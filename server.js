@@ -679,7 +679,7 @@ app.delete('/api/files/:filename(*)', mutationRateLimit, (req, res) => {
 // 5. Rename file
 app.patch('/api/files/:filename(*)', mutationRateLimit, (req, res) => {
   const oldName = req.params.filename;
-  const { newName } = req.body;
+  const { newName } = req.body || {};
 
   if (!newName) {
     return res.status(400).json({ error: 'New name is required' });
@@ -756,7 +756,7 @@ app.patch('/api/files/:filename(*)', mutationRateLimit, (req, res) => {
 
 // 6. Hash Scanner REST Endpoint
 app.post('/api/hash/scan', uploadRateLimit, async (req, res) => {
-  const { sourcePath, outputFile, algorithm = config.defaultHashAlgorithm } = req.body;
+  const { sourcePath, outputFile, algorithm = config.defaultHashAlgorithm } = req.body || {};
   if (!sourcePath) {
     return res.status(400).json({ error: 'sourcePath is required' });
   }
@@ -939,6 +939,20 @@ app.post('/api/hash/audit', uploadRateLimit, async (req, res) => {
   } catch (err) {
     res.status(500).json({ error: 'Manifest audit failed' });
   }
+});
+
+// Keep malformed JSON and oversized JSON requests in the API's response
+// format instead of allowing Express's HTML error page to leak through.
+app.use((err, req, res, next) => {
+  if (res.headersSent) return next(err);
+  if (err.type === 'entity.parse.failed') {
+    return res.status(400).json({ error: 'Invalid JSON request body' });
+  }
+  if (err.type === 'entity.too.large') {
+    return res.status(413).json({ error: 'Request body is too large' });
+  }
+  console.error('[Server] Unhandled request error:', err.message);
+  return res.status(500).json({ error: 'Internal server error' });
 });
 
 // Create HTTP Server & Bind WebSockets

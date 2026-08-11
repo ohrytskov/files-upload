@@ -84,6 +84,11 @@ test('authenticated WebSocket upload writes, verifies, and audits a binary file'
     }));
     assert.equal((await nextMessage(socket)).type, 'FILE_STARTED');
 
+    socket.send(encodeChunk({ relativePath: 'nested/file.txt', offset: 0, data: Buffer.alloc(0) }));
+    const emptyChunkError = await nextMessage(socket);
+    assert.equal(emptyChunkError.type, 'FILE_ERROR');
+    assert.match(emptyChunkError.payload.error, /Empty chunks/);
+
     socket.send(encodeChunk({ relativePath: 'nested/file.txt', offset: 0, data: content }));
     const acknowledgement = await nextMessage(socket);
     assert.equal(acknowledgement.type, 'CHUNK_ACK');
@@ -168,6 +173,66 @@ test('WebSocket upload resumes a staged multi-chunk file without corrupting offs
     }));
     assert.equal((await nextMessage(secondSocket)).type, 'FILE_VERIFIED');
     assert.deepEqual(fs.readFileSync(path.join(root, 'resume.bin')), content);
+  } finally {
+    for (const socket of [firstSocket, secondSocket]) {
+      if (socket && socket.readyState === WebSocket.OPEN) socket.close();
+    }
+    await closeServer(server);
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('a reconnecting session takes over its previous socket without reconnect thrashing', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'files-upload-ws-takeover-'));
+  const server = http.createServer();
+  initWebSocketServer(server, root, {
+    authToken: 'takeover-token',
+    maxPayload: 1024 * 1024,
+    maxManifestFiles: 10,
+    authTimeoutMs: 1000
+  });
+
+  let firstSocket;
+  let secondSocket;
+  try {
+    await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+    const port = server.address().port;
+    const manifest = {
+      sessionId: 'takeover-session',
+      files: [{
+        relativePath: 'takeover.txt',
+        size: 0,
+        hashAlgorithm: 'sha256',
+        hash: crypto.createHash('sha256').update(Buffer.alloc(0)).digest('hex')
+      }]
+    };
+
+    firstSocket = new WebSocket(`ws://127.0.0.1:${port}/ws/upload`);
+    await waitForOpen(firstSocket);
+    firstSocket.send(JSON.stringify({ type: 'AUTH', payload: { token: 'takeover-token' } }));
+    assert.equal((await nextMessage(firstSocket)).type, 'AUTH_OK');
+    firstSocket.send(JSON.stringify({ type: 'INIT_SESSION', payload: manifest }));
+    assert.equal((await nextMessage(firstSocket)).type, 'SESSION_READY');
+
+    const firstClose = new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error('Previous socket was not invalidated')), 5000);
+      firstSocket.once('close', (code, reason) => {
+        clearTimeout(timer);
+        resolve({ code, reason: reason.toString() });
+      });
+    });
+
+    secondSocket = new WebSocket(`ws://127.0.0.1:${port}/ws/upload`);
+    await waitForOpen(secondSocket);
+    secondSocket.send(JSON.stringify({ type: 'AUTH', payload: { token: 'takeover-token' } }));
+    assert.equal((await nextMessage(secondSocket)).type, 'AUTH_OK');
+    secondSocket.send(JSON.stringify({ type: 'INIT_SESSION', payload: manifest }));
+    assert.equal((await nextMessage(secondSocket)).type, 'SESSION_READY');
+
+    assert.deepEqual(await firstClose, {
+      code: 4001,
+      reason: 'Session taken over by reconnecting client'
+    });
   } finally {
     for (const socket of [firstSocket, secondSocket]) {
       if (socket && socket.readyState === WebSocket.OPEN) socket.close();

@@ -28,4 +28,5 @@ test('JSON FILE_CHUNK messages are rejected', () => {
 test('malformed binary chunk frames are rejected', () => {
   assert.throws(() => decodeChunk(Buffer.from([0, 0, 0, 0])), /header length/);
   assert.throws(() => encodeChunk({ relativePath: '../outside', offset: -1, data: Buffer.alloc(0) }), /metadata/);
+  assert.throws(() => encodeChunk({ relativePath: 'file.txt', offset: Number.MAX_SAFE_INTEGER + 1, data: Buffer.alloc(0) }), /metadata/);
 });

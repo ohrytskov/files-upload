@@ -61,3 +61,51 @@ test('hash generation rejects a missing source path', async () => {
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
+
+test('hash manifests exclude their own output file and cannot overwrite the source', async () => {
+  const root = temporaryDirectory();
+  try {
+    const source = path.join(root, 'source.txt');
+    const output = path.join(root, 'hashes.txt');
+    fs.writeFileSync(source, 'manifest input');
+    fs.writeFileSync(output, 'old manifest\n');
+
+    const result = await generateHashes({ sourcePath: root, outputFile: output, algorithm: 'sha256' });
+    assert.equal(result.totalFiles, 1);
+    assert.deepEqual(result.files.map(file => file.relativePath), ['source.txt']);
+    assert.match(fs.readFileSync(output, 'utf8'), /source\.txt\n$/);
+
+    await assert.rejects(
+      () => generateHashes({ sourcePath: source, outputFile: source }),
+      /must not overwrite the source file/
+    );
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('hash manifests reject symbolic-link and hard-link output aliases', async () => {
+  const root = temporaryDirectory();
+  try {
+    const source = path.join(root, 'source.txt');
+    const hardLink = path.join(root, 'hashes-hardlink.txt');
+    fs.writeFileSync(source, 'source content');
+    fs.linkSync(source, hardLink);
+
+    await assert.rejects(
+      () => generateHashes({ sourcePath: root, outputFile: hardLink }),
+      /must not be a hard link/
+    );
+
+    if (process.platform !== 'win32') {
+      const symbolicLink = path.join(root, 'hashes-symlink.txt');
+      fs.symlinkSync(source, symbolicLink);
+      await assert.rejects(
+        () => generateHashes({ sourcePath: root, outputFile: symbolicLink }),
+        /must not be a symbolic link/
+      );
+    }
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});

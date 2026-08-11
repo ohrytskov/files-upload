@@ -96,6 +96,28 @@ test('HTTP API loads configured storage and protects hash scan endpoints', async
     const directories = await directoriesResponse.json();
     assert.equal(directories.directories.some(directory => directory.value === '.'), true);
 
+    const emptyScanResponse = await fetch(`${baseUrl}/api/hash/scan`, {
+      method: 'POST',
+      headers: { ...headers, 'Content-Type': 'application/json' },
+      body: 'null'
+    });
+    assert.equal(emptyScanResponse.status, 400);
+
+    const malformedJsonResponse = await fetch(`${baseUrl}/api/hash/scan`, {
+      method: 'POST',
+      headers: { ...headers, 'Content-Type': 'application/json' },
+      body: '{'
+    });
+    assert.equal(malformedJsonResponse.status, 400);
+    assert.deepEqual(await malformedJsonResponse.json(), { error: 'Invalid JSON request body' });
+
+    const emptyRenameResponse = await fetch(`${baseUrl}/api/files/${encodeURIComponent('server.txt')}`, {
+      method: 'PATCH',
+      headers: { ...headers, 'Content-Type': 'application/json' },
+      body: 'null'
+    });
+    assert.equal(emptyRenameResponse.status, 400);
+
     const scanResponse = await fetch(`${baseUrl}/api/hash/scan`, {
       method: 'POST',
       headers: { ...headers, 'Content-Type': 'application/json' },

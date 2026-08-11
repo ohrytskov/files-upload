@@ -10,6 +10,7 @@ import {
 } from '../utils/browser-upload-session.mjs';
 
 const CHUNK_SIZE = UPLOAD_CHUNK_SIZE;
+const SESSION_TAKEN_OVER_CLOSE_CODE = 4001;
 
 function encodeBinaryChunk(relativePath, offset, arrayBuffer) {
   const header = new TextEncoder().encode(JSON.stringify({
@@ -177,6 +178,11 @@ export default function WebSocketUploader({ onAuditTrigger, authToken, onNotify 
       return;
     }
 
+    if (socketRef.current?.readyState === WebSocket.CONNECTING) {
+      setSessionStatus('Connecting...');
+      return;
+    }
+
     if (reconnectTimerRef.current) {
       window.clearTimeout(reconnectTimerRef.current);
       reconnectTimerRef.current = null;
@@ -187,6 +193,11 @@ export default function WebSocketUploader({ onAuditTrigger, authToken, onNotify 
       setIsPaused(false);
       setSessionStatus('Uploading...');
       uploadNextFile();
+      return;
+    }
+
+    if (socketRef.current?.readyState === WebSocket.OPEN) {
+      setSessionStatus('Uploading...');
       return;
     }
 
@@ -211,6 +222,10 @@ export default function WebSocketUploader({ onAuditTrigger, authToken, onNotify 
     socketRef.current = ws;
 
     ws.onopen = () => {
+      if (socketRef.current !== ws || stoppingRef.current) {
+        ws.close();
+        return;
+      }
       setIsUploading(true);
       setIsPaused(false);
       pausedRef.current = false;
@@ -235,6 +250,7 @@ export default function WebSocketUploader({ onAuditTrigger, authToken, onNotify 
     };
 
     ws.onmessage = (e) => {
+      if (socketRef.current !== ws) return;
       try {
         const msg = JSON.parse(e.data);
         handleMessage(msg);
@@ -244,13 +260,14 @@ export default function WebSocketUploader({ onAuditTrigger, authToken, onNotify 
     };
 
     ws.onerror = () => {
+      if (socketRef.current !== ws) return;
       setSessionStatus('Connection Error');
     };
 
     ws.onclose = (event) => {
       if (socketRef.current !== ws) return;
       socketRef.current = null;
-      if ([1002, 1003, 1007, 1008, 1009].includes(event.code)) {
+      if ([1002, 1003, 1007, 1008, 1009, SESSION_TAKEN_OVER_CLOSE_CODE].includes(event.code)) {
         stoppingRef.current = true;
         setIsUploading(false);
         setSessionStatus('Connection rejected by server');
@@ -459,14 +476,15 @@ export default function WebSocketUploader({ onAuditTrigger, authToken, onNotify 
   };
 
   const sendChunk = async (relativePath, offset) => {
-    if (!socketRef.current || pausedRef.current) return;
+    const socket = socketRef.current;
+    if (!socket || socket.readyState !== WebSocket.OPEN || pausedRef.current) return;
     const fileItem = manifestRef.current?.files.find(f => f.relativePath === relativePath);
     if (!fileItem || !fileItem.file) return;
 
     try {
       const end = Math.min(offset + CHUNK_SIZE, fileItem.size);
       if (end <= offset) {
-        socketRef.current.send(JSON.stringify({
+        socket.send(JSON.stringify({
           type: 'FINISH_FILE',
           payload: {
             relativePath,
@@ -479,9 +497,9 @@ export default function WebSocketUploader({ onAuditTrigger, authToken, onNotify 
       }
 
       const buffer = await fileItem.file.slice(offset, end).arrayBuffer();
-      if (pausedRef.current || socketRef.current?.readyState !== WebSocket.OPEN) return;
+      if (pausedRef.current || socketRef.current !== socket || socket.readyState !== WebSocket.OPEN) return;
 
-      socketRef.current.send(encodeBinaryChunk(relativePath, offset, buffer));
+      socket.send(encodeBinaryChunk(relativePath, offset, buffer));
     } catch (error) {
       onNotify?.(`Failed to read ${relativePath}: ${error.message}`, 'error');
       stoppingRef.current = true;
