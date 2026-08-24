@@ -7,7 +7,7 @@ function parseArgs() {
   const args = process.argv.slice(2);
   const options = {
     sourcePath: null,
-    serverUrl: 'ws://localhost:3000/ws/upload',
+    serverUrl: 'ws://localhost:3001/ws/upload',
     stateFilePath: config.defaultStateFile,
     outputHashesFile: null,
     authToken: config.authToken,
@@ -48,7 +48,7 @@ Usage:
 
 Options:
   -p, --path <path>      Target folder path (Windows 11 paths supported e.g. "D:\\folder" or Linux paths)
-  -s, --server <url>     Remote/Local WebSocket server URL (default: ws://localhost:3000/ws/upload)
+  -s, --server <url>     Remote/Local WebSocket server URL (default: ws://localhost:3001/ws/upload)
   -o, --output <file>    Optional path to save standard hashes.txt manifest
   --state <file>         Persistent state JSON path (default: state.json for resuming)
   --token <token>        Bearer token when server authentication is enabled

@@ -40,14 +40,14 @@ The server persists its state in SQLite. It prefers `better-sqlite3`; on Node.js
 
 ## 🚀 Quick Start
 
-### 1. Install & Start Server
+### 1. Install & Start Backend
 ```bash
 npm install
 npm run build
 npm start
 ```
 
-Server configuration is loaded from `.env`. The checked-in `.env.example` is a runnable loopback configuration. For a network deployment, change `HOST` and set a non-empty `CLOUDVAULT_AUTH_TOKEN` before starting.
+Backend configuration is loaded from `.env`. The checked-in `.env.example` keeps the backend on `127.0.0.1:3001`, while the frontend is exposed separately on port `3000`. Set a non-empty `CLOUDVAULT_AUTH_TOKEN` before starting a network deployment.
 
 The default scan root is:
 ```dotenv
@@ -55,9 +55,22 @@ HASH_SCAN_ROOT=./uploads
 ```
 Copy `.env.example` when setting up another installation and change the paths as needed. Shell environment variables still take precedence over `.env`.
 
-Server runs on:
-- Web Interface: `http://localhost:3000`
-- WebSocket Upload Endpoint: `ws://localhost:3000/ws/upload`
+The backend listens internally on:
+- HTTP API: `http://127.0.0.1:3001`
+- WebSocket Upload Endpoint: `ws://127.0.0.1:3001/ws/upload`
+
+### 2. Start Frontend
+
+Run the Vite frontend in a second shell:
+```bash
+# Development server:
+npm run dev
+
+# Or, after `npm run build`, serve the built UI:
+npm run preview
+```
+
+The frontend is pinned to `0.0.0.0:3000` and proxies `/api`, `/uploads`, and `/ws` to the internal backend. Open `http://<server-ip>:3000` from a remote laptop. Only TCP port `3000` needs to be exposed externally; keep backend port `3001` internal.
 
 To enable authentication, set `CLOUDVAULT_AUTH_TOKEN` before starting the server. Enter the same token in the dashboard API token field or pass it to the CLI with `--token`. When authentication is enabled, `/api`, `/ws/upload`, and `/uploads` require authentication; the dashboard obtains a browser session cookie through its authenticated API requests.
 
@@ -69,10 +82,10 @@ This is suitable for a single host handling thousands of files and multi-gigabyt
 
 For production deployments, configure a non-empty `CLOUDVAULT_AUTH_TOKEN`, terminate WebSocket traffic over TLS (`wss://`) at a reverse proxy, enforce storage quotas/free-space monitoring, back up the uploads directory and SQLite database, and test the filesystem’s rename/fsync behavior. Per-chunk fsync is disabled by default for throughput and the completed file is synced before publication; set `WS_SYNC_EACH_CHUNK=true` when stronger power-loss durability is worth the throughput cost.
 
-### 2. Run Stateful Batch Upload via CLI
+### 3. Run Stateful Batch Upload via CLI
 ```bash
 # Upload a Windows 11 path to local or remote WebSocket server:
-node bin/upload-cli.js -p "D:\marriage" -s "ws://localhost:3000/ws/upload"
+node bin/upload-cli.js -p "D:\marriage" -s "ws://127.0.0.1:3001/ws/upload"
 
 # Use SHA-256 and an authenticated server:
 node bin/upload-cli.js -p "/data/to-upload" --algorithm sha256 --token "$CLOUDVAULT_AUTH_TOKEN"
@@ -81,8 +94,8 @@ node bin/upload-cli.js -p "/data/to-upload" --algorithm sha256 --token "$CLOUDVA
 node bin/upload-cli.js -p "/var/www/hello/my/files-area" -o "hashes.txt"
 ```
 
-### 3. Interactive Web UI
-Open `http://localhost:3000` in your browser to access:
+### 4. Interactive Web UI
+Open `http://<server-ip>:3000` in your browser to access:
 - **File Repository**: View, preview, search, download, rename, or delete uploaded files with hash tags.
 - **WebSocket Batch Uploader**: Select local files/directories, choose MD5 or SHA-256, watch real-time speeds and progress bars, and pause/resume transfers.
 - The browser uploader persists session metadata locally; after a page reload, select the same files again to resume their server-side staged upload.
@@ -105,7 +118,7 @@ Usage: node bin/upload-cli.js --path <TargetFolderPath> [options]
 
 Options:
   -p, --path <path>      Target folder path (Windows 11 & Linux supported)
-  -s, --server <url>     WebSocket server URL (default: ws://localhost:3000/ws/upload)
+  -s, --server <url>     WebSocket server URL (default: ws://localhost:3001/ws/upload)
   -o, --output <file>    Path to save standard hashes.txt manifest
   --state <file>         State JSON path (default: state.json for resuming)
   --token <token>        Bearer token when authentication is enabled

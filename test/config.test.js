@@ -17,7 +17,7 @@ test('project configuration loads the local .env defaults', () => {
 
 test('environment template is runnable on loopback by default', () => {
   const example = fs.readFileSync(path.resolve(__dirname, '..', '.env.example'), 'utf8');
-  assert.match(example, /^PORT=3000$/m);
+  assert.match(example, /^PORT=3001$/m);
   assert.match(example, /^HOST=127\.0\.0\.1$/m);
   assert.doesNotMatch(example, /^\+PORT=/m);
 });
