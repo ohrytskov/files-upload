@@ -97,6 +97,7 @@ node bin/upload-cli.js -p "/var/www/hello/my/files-area" -o "hashes.txt"
 ### 4. Interactive Web UI
 Open `http://<server-ip>:3000` in your browser to access:
 - **File Repository**: View, preview, search, download, rename, or delete uploaded files with hash tags.
+- **Commander View**: Open the side-by-side local/remote workspace from the left navigation, compare every selected path with fresh SHA-256 hashes without uploading, or upload selected differences through the resumable browser WebSocket flow.
 - **WebSocket Batch Uploader**: Select local files/directories, choose MD5 or SHA-256, watch real-time speeds and progress bars, and pause/resume transfers.
 - The browser uploader persists session metadata locally; after a page reload, select the same files again to resume their server-side staged upload.
 - **Hash Audit Report**: Select a local directory and a configured server directory, then compare SHA-256 or MD5 hashes.

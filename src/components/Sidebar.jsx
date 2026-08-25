@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Folder, UploadCloud, ShieldCheck, Cloud, KeyRound } from 'lucide-react';
+import { Folder, UploadCloud, ShieldCheck, Cloud, KeyRound, Columns2 } from 'lucide-react';
 import { STORAGE_DISPLAY_LIMIT_MB } from '../config';
 
 export default function Sidebar({ activeTab, setActiveTab, stats, authToken, onAuthTokenChange }) {
@@ -30,6 +30,12 @@ export default function Sidebar({ activeTab, setActiveTab, stats, authToken, onA
         </div>
 
         <nav className="nav-menu">
+          <button
+            className={`nav-item ${activeTab === 'commander' ? 'active' : ''}`}
+            onClick={() => setActiveTab('commander')}
+          >
+            <Columns2 size={18} /> Commander View
+          </button>
           <button
             className={`nav-item ${activeTab === 'repository' ? 'active' : ''}`}
             onClick={() => setActiveTab('repository')}

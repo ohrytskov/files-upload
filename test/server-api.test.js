@@ -131,6 +131,13 @@ test('HTTP API loads configured storage and protects hash scan endpoints', async
     assert.equal(Object.prototype.hasOwnProperty.call(scan.files[0], 'absolutePath'), false);
     assert.equal(scan.files[0].hash, crypto.createHash('sha256').update(fileContent).digest('hex'));
 
+    const shaListingResponse = await fetch(`${baseUrl}/api/files?includeHash=1&algorithm=sha256`, { headers });
+    assert.equal(shaListingResponse.status, 200);
+    const shaListing = await shaListingResponse.json();
+    const listedServerFile = shaListing.files.find(file => file.relativePath === 'server.txt');
+    assert.equal(listedServerFile.hashAlgorithm, 'sha256');
+    assert.equal(listedServerFile.hash, crypto.createHash('sha256').update(fileContent).digest('hex'));
+
     const uploadContent = Buffer.from('authenticated HTTP upload');
     const uploadHash = crypto.createHash('sha256').update(uploadContent).digest('hex');
     const form = new FormData();

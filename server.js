@@ -6,7 +6,7 @@ const express = require('express');
 const multer = require('multer');
 
 const config = require('./lib/config');
-const { initWebSocketServer, calculateServerHash, calculateServerMd5 } = require('./lib/ws-server');
+const { initWebSocketServer, calculateServerHash } = require('./lib/ws-server');
 const { generateHashes, normalizeHashAlgorithm } = require('./lib/hash-generator');
 const { isInternalUploadFile, normalizeFilename, normalizeRelativePath, resolveSafePath } = require('./lib/path-utils');
 const {
@@ -22,7 +22,7 @@ const UPLOADS_DIR = config.uploadsDir;
 const HASH_SCAN_ROOT = config.hashScanRoot;
 const STATE_DB_PATH = path.resolve(config.stateDbPath);
 const AUTH_TOKEN = normalizeToken(config.authToken);
-const md5Cache = new Map();
+const hashCache = new Map();
 let serverStateManager = null;
 let auditPromise = null;
 const PART_SUFFIX = '.cloudvault-part';
@@ -402,40 +402,62 @@ async function collectHashDirectories() {
   return directories;
 }
 
-function getCachedServerMd5(filePath, stats) {
-  const cacheKey = path.resolve(filePath);
-  const cached = md5Cache.get(cacheKey);
+function getCachedServerHash(filePath, stats, algorithm) {
+  const normalizedAlgorithm = normalizeHashAlgorithm(algorithm);
+  const cacheKey = `${normalizedAlgorithm}:${path.resolve(filePath)}`;
+  const cached = hashCache.get(cacheKey);
   if (cached && matchesFileFingerprint(cached, stats)) {
-    return cached.md5;
+    return cached.hash;
   }
 
-  const pending = calculateServerMd5(filePath);
-  md5Cache.set(cacheKey, {
+  const pending = calculateServerHash(filePath, normalizedAlgorithm);
+  hashCache.set(cacheKey, {
     size: stats.size,
     mtimeMs: stats.mtimeMs,
     ctimeMs: stats.ctimeMs,
     ino: stats.ino,
     dev: stats.dev,
-    md5: pending
+    hash: pending
   });
-  pending.then(md5 => {
-    const current = md5Cache.get(cacheKey);
-    if (current && current.md5 === pending) current.md5 = md5;
+  pending.then(hash => {
+    const current = hashCache.get(cacheKey);
+    if (current && current.hash === pending) current.hash = hash;
   }).catch(() => {
-    const current = md5Cache.get(cacheKey);
-    if (current && current.md5 === pending) md5Cache.delete(cacheKey);
+    const current = hashCache.get(cacheKey);
+    if (current && current.hash === pending) hashCache.delete(cacheKey);
   });
   return pending;
 }
 
-function invalidateMd5Cache(...filePaths) {
-  filePaths.forEach(filePath => md5Cache.delete(path.resolve(filePath)));
+function invalidateHashCache(...filePaths) {
+  filePaths.forEach(filePath => {
+    const resolved = path.resolve(filePath);
+    hashCache.delete(`md5:${resolved}`);
+    hashCache.delete(`sha256:${resolved}`);
+  });
 }
 
 // 1. Get all files with metadata & verified hash when available
 app.get('/api/files', async (req, res) => {
   try {
-    const includeHash = ['1', 'true', 'yes'].includes(String(req.query.includeHash || '').toLowerCase());
+    const includeHashValue = String(req.query.includeHash || '').toLowerCase();
+    const requestedAlgorithmValue = String(req.query.algorithm || '').toLowerCase();
+    const hashRequestedByAlgorithm = ['md5', 'sha256'].includes(requestedAlgorithmValue);
+    const hashRequestedByValue = ['md5', 'sha256'].includes(includeHashValue);
+    const includeHash = ['1', 'true', 'yes'].includes(includeHashValue) ||
+      hashRequestedByAlgorithm || hashRequestedByValue;
+    // Keep includeHash=1 backwards-compatible with the original MD5 listing,
+    // while allowing Commander View to request a fresh SHA-256 listing.
+    let requestedHashAlgorithm = null;
+    if (includeHash) {
+      try {
+        requestedHashAlgorithm = normalizeHashAlgorithm(
+          requestedAlgorithmValue || (hashRequestedByValue ? includeHashValue : 'md5')
+        );
+      } catch (error) {
+        return res.status(400).json({ error: error.message });
+      }
+    }
     const files = await collectUploadFiles();
     const fileList = [];
 
@@ -447,29 +469,35 @@ app.get('/api/files', async (req, res) => {
       let hashStatus = 'unknown';
       const stateAlgorithm = stateFile?.hashAlgorithm || (stateFile?.md5 ? 'md5' : null);
 
-      if (repositoryFile && matchesRepositoryMetadata(repositoryFile, file.stats) && repositoryFile.hash) {
+      if (
+        repositoryFile &&
+        matchesRepositoryMetadata(repositoryFile, file.stats) &&
+        repositoryFile.hash &&
+        (!requestedHashAlgorithm || repositoryFile.hashAlgorithm === requestedHashAlgorithm)
+      ) {
         serverHash = repositoryFile.hash;
         hashAlgorithm = repositoryFile.hashAlgorithm;
         hashStatus = repositoryFile.hashStatus || 'unknown';
       } else if (
         stateFile?.status === 'verified' &&
         stateAlgorithm &&
+        (!requestedHashAlgorithm || stateAlgorithm === requestedHashAlgorithm) &&
         matchesStateMetadata(stateFile, file.stats)
       ) {
         serverHash = stateFile.serverHash || stateFile.serverMd5 || null;
         hashAlgorithm = stateAlgorithm;
         hashStatus = serverHash ? 'verified' : 'unknown';
       } else if (includeHash) {
-        serverHash = await getCachedServerMd5(file.filePath, file.stats);
-        hashAlgorithm = 'md5';
+        serverHash = await getCachedServerHash(file.filePath, file.stats, requestedHashAlgorithm);
+        hashAlgorithm = requestedHashAlgorithm;
         hashStatus = serverHash ? 'server-only' : 'unknown';
         if (serverHash) {
           serverStateManager?.upsertRepositoryFile({
             relativePath: file.relativePath,
             size: file.stats.size,
             hash: serverHash,
-            hashAlgorithm: 'md5',
-            md5: serverHash,
+            hashAlgorithm: requestedHashAlgorithm,
+            md5: requestedHashAlgorithm === 'md5' ? serverHash : null,
             hashStatus,
             createdAtMs: file.stats.birthtimeMs,
             modifiedAtMs: file.stats.mtimeMs,
@@ -554,7 +582,7 @@ app.post('/api/upload', uploadRateLimit, handleHttpUpload, async (req, res) => {
       const filePath = path.join(UPLOADS_DIR, file.filename);
       const stats = fs.statSync(filePath);
       const serverHash = hashAlgorithm === 'md5'
-        ? await getCachedServerMd5(filePath, stats)
+        ? await getCachedServerHash(filePath, stats, 'md5')
         : await calculateServerHash(filePath, hashAlgorithm);
       const expectedHash = clientHashes ? clientHashes[index].toLowerCase() : null;
 
@@ -597,7 +625,7 @@ app.post('/api/upload', uploadRateLimit, handleHttpUpload, async (req, res) => {
       const filePath = path.join(UPLOADS_DIR, file.filename);
       try {
         fs.unlinkSync(filePath);
-        invalidateMd5Cache(filePath);
+        invalidateHashCache(filePath);
       } catch (cleanupErr) {}
       serverStateManager?.deleteRepositoryFile(file.filename);
     }
@@ -665,7 +693,7 @@ app.delete('/api/files/:filename(*)', mutationRateLimit, (req, res) => {
     if (err) {
       return res.status(500).json({ error: 'Failed to delete file' });
     }
-    invalidateMd5Cache(filePath);
+    invalidateHashCache(filePath);
     try { removePartFile(filePath); } catch (partError) {
       console.error('[Server] Failed to remove staged upload after delete:', partError.message);
     }
@@ -740,7 +768,7 @@ app.patch('/api/files/:filename(*)', mutationRateLimit, (req, res) => {
       serverStateManager?.renameRepositoryFile(normalizedOldName, normalizedNewName);
       serverStateManager?.renameTrackedFile(normalizedOldName, normalizedNewName);
       serverStateManager?.flushSave();
-      invalidateMd5Cache(oldPath, newPath);
+      invalidateHashCache(oldPath, newPath);
       res.json({ message: 'File renamed successfully', oldName: normalizedOldName, newName: normalizedNewName });
     } catch (renameError) {
       if (partMoved) {

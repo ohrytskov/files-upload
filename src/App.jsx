@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import Sidebar from './components/Sidebar';
 import FileRepository from './components/FileRepository';
+import CommanderView from './components/CommanderView';
 import WebSocketUploader from './components/WebSocketUploader';
 import MD5AuditReport from './components/MD5AuditReport';
 import PreviewModal from './components/PreviewModal';
@@ -185,6 +186,14 @@ export default function App() {
             onDelete={handleDeleteFile}
             onUploadFiles={handleUploadFiles}
             onNotify={notify}
+          />
+        )}
+
+        {activeTab === 'commander' && (
+          <CommanderView
+            authToken={authToken}
+            onNotify={notify}
+            onRefresh={() => { fetchFiles(); fetchStats(); }}
           />
         )}
 
