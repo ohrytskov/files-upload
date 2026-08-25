@@ -130,10 +130,20 @@ function StatusBadge({ status }) {
   );
 }
 
-function FileRow({ file, status, isLocal, selected, onToggle }) {
+function FileRow({ file, status, isLocal, selected, isCurrent, onToggle, onActivate }) {
   const relativePath = getFilePath(file);
   return (
-    <div className={`commander-file-row commander-file-row-${status}`}>
+    <div
+      className={`commander-file-row commander-file-row-${status}${isCurrent ? ' commander-file-row-current' : ''}`}
+      role="option"
+      aria-selected={isCurrent}
+      tabIndex={isCurrent ? 0 : -1}
+      onClick={event => {
+        onActivate?.();
+        event.currentTarget.focus();
+      }}
+      onFocus={onActivate}
+    >
       <div className="commander-file-select">
         {isLocal ? (
           <input
@@ -163,10 +173,12 @@ function isTerminalUpload(status = '') {
   return status.startsWith('Completed') || status.startsWith('Upload failed') || status.startsWith('Audit failed');
 }
 
-export default function CommanderView({ authToken, onNotify, onRefresh }) {
+export default function CommanderView({ authToken, onNotify, onPreview, onRefresh }) {
   const [localFiles, setLocalFiles] = useState([]);
   const [remoteFiles, setRemoteFiles] = useState([]);
   const [selectedPaths, setSelectedPaths] = useState(new Set());
+  const [activePanel, setActivePanel] = useState('local');
+  const [currentPaths, setCurrentPaths] = useState({ local: null, remote: null });
   const [search, setSearch] = useState('');
   const [isHashing, setIsHashing] = useState(false);
   const [hashProgress, setHashProgress] = useState('');
@@ -180,6 +192,7 @@ export default function CommanderView({ authToken, onNotify, onRefresh }) {
   const uploaderRef = useRef(null);
   const localInputRef = useRef(null);
   const folderInputRef = useRef(null);
+  const listRefs = useRef({ local: null, remote: null });
 
   const localByPath = useMemo(
     () => new Map(localFiles.map(file => [getFilePath(file), file])),
@@ -205,6 +218,77 @@ export default function CommanderView({ authToken, onNotify, onRefresh }) {
   const selectedFiles = localFiles.filter(file => selectedPaths.has(getFilePath(file)));
   const uploadBusy = Boolean(uploadState?.isUploading && !uploadState?.isPaused);
 
+  const visibleFilesForPanel = panel => panel === 'local' ? visibleLocalFiles : visibleRemoteFiles;
+
+  const currentFileForPanel = panel => {
+    const visibleFiles = visibleFilesForPanel(panel);
+    const currentPath = currentPaths[panel];
+    return visibleFiles.find(file => getFilePath(file) === currentPath) || visibleFiles[0] || null;
+  };
+
+  const activateFile = (panel, file) => {
+    if (!file) return;
+    setActivePanel(panel);
+    setCurrentPaths(current => ({ ...current, [panel]: getFilePath(file) }));
+  };
+
+  const focusPanel = panel => {
+    listRefs.current[panel]?.focus();
+  };
+
+  const switchPanel = () => {
+    const nextPanel = activePanel === 'local' ? 'remote' : 'local';
+    const nextFile = currentFileForPanel(nextPanel);
+    if (nextFile) {
+      setCurrentPaths(current => ({ ...current, [nextPanel]: getFilePath(nextFile) }));
+    }
+    setActivePanel(nextPanel);
+    focusPanel(nextPanel);
+  };
+
+  const viewCurrentFile = (panel = activePanel) => {
+    const currentFile = currentFileForPanel(panel);
+    if (!currentFile) {
+      onNotify?.(`There are no ${panel} files to view.`, 'info');
+      return;
+    }
+    activateFile(panel, currentFile);
+    onPreview?.(currentFile);
+  };
+
+  const handlePanelKeyDown = (panel, event) => {
+    if (event.key === 'Tab') {
+      event.preventDefault();
+      event.stopPropagation();
+      switchPanel();
+      return;
+    }
+
+    if (event.key === 'F3') {
+      event.preventDefault();
+      event.stopPropagation();
+      viewCurrentFile(panel);
+      return;
+    }
+
+    const files = visibleFilesForPanel(panel);
+    if (files.length === 0) return;
+
+    const currentIndex = Math.max(
+      0,
+      files.findIndex(file => getFilePath(file) === currentPaths[panel])
+    );
+    let nextIndex = currentIndex;
+    if (event.key === 'ArrowDown') nextIndex = Math.min(files.length - 1, currentIndex + 1);
+    if (event.key === 'ArrowUp') nextIndex = Math.max(0, currentIndex - 1);
+    if (event.key === 'Home') nextIndex = 0;
+    if (event.key === 'End') nextIndex = files.length - 1;
+    if (nextIndex === currentIndex && !['Home', 'End'].includes(event.key)) return;
+
+    event.preventDefault();
+    activateFile(panel, files[nextIndex]);
+  };
+
   const fetchRemoteFiles = async (notifyOnError = true) => {
     setRemoteLoading(true);
     try {
@@ -225,6 +309,42 @@ export default function CommanderView({ authToken, onNotify, onRefresh }) {
   useEffect(() => {
     fetchRemoteFiles().catch(() => {});
   }, [authToken]);
+
+  useEffect(() => {
+    setCurrentPaths(current => {
+      const nextLocalPath = current.local && localFiles.some(file => getFilePath(file) === current.local)
+        ? current.local
+        : localFiles[0] ? getFilePath(localFiles[0]) : null;
+      const nextRemotePath = current.remote && remoteFiles.some(file => getFilePath(file) === current.remote)
+        ? current.remote
+        : remoteFiles[0] ? getFilePath(remoteFiles[0]) : null;
+
+      if (nextLocalPath === current.local && nextRemotePath === current.remote) return current;
+      return { local: nextLocalPath, remote: nextRemotePath };
+    });
+  }, [localFiles, remoteFiles]);
+
+  useEffect(() => {
+    const handleGlobalShortcut = event => {
+      if (event.defaultPrevented || event.target?.closest?.('[role="dialog"]')) return;
+      const commanderTarget = event.target?.closest?.('.commander-view');
+      if (!commanderTarget) return;
+
+      if (event.key === 'F3') {
+        event.preventDefault();
+        viewCurrentFile();
+        return;
+      }
+
+      if (event.key === 'Tab' && !event.target?.matches?.('input, textarea, select, [contenteditable="true"]')) {
+        event.preventDefault();
+        switchPanel();
+      }
+    };
+
+    window.addEventListener('keydown', handleGlobalShortcut);
+    return () => window.removeEventListener('keydown', handleGlobalShortcut);
+  }, [activePanel, currentPaths, visibleLocalFiles, visibleRemoteFiles]);
 
   useEffect(() => () => {
     uploaderRef.current?.dispose();
@@ -510,8 +630,8 @@ export default function CommanderView({ authToken, onNotify, onRefresh }) {
         </div>
       </div>
 
-      <div className="commander-panels">
-        <section className="commander-panel">
+      <div className="commander-panels" aria-label="Commander file panels">
+        <section className={`commander-panel${activePanel === 'local' ? ' commander-panel-active' : ''}`}>
           <header className="commander-panel-header">
             <div className="commander-panel-title">
               <div className="commander-panel-icon local"><FolderOpen size={19} /></div>
@@ -528,28 +648,59 @@ export default function CommanderView({ authToken, onNotify, onRefresh }) {
               </label>
             </div>
           </header>
-          <div className="commander-list commander-list-local">
+          <div
+            ref={element => { listRefs.current.local = element; }}
+            className="commander-list commander-list-local"
+            role="listbox"
+            tabIndex={0}
+            aria-label="Local files"
+            onFocus={() => setActivePanel('local')}
+            onKeyDown={event => handlePanelKeyDown('local', event)}
+          >
             {visibleLocalFiles.length > 0 ? visibleLocalFiles.map(file => {
               const relativePath = getFilePath(file);
-              return <FileRow key={relativePath} file={file} isLocal selected={selectedPaths.has(relativePath)} onToggle={toggleSelectedPath} status={isHashing && !file.hash ? 'hashing' : uploadStatusFor(relativePath)} />;
+              return <FileRow
+                key={relativePath}
+                file={file}
+                isLocal
+                selected={selectedPaths.has(relativePath)}
+                isCurrent={currentPaths.local === relativePath}
+                onToggle={toggleSelectedPath}
+                onActivate={() => activateFile('local', file)}
+                status={isHashing && !file.hash ? 'hashing' : uploadStatusFor(relativePath)}
+              />;
             }) : (
               <div className="commander-empty"><FolderOpen size={28} /><strong>No local files selected</strong><span>Choose files or a folder to build the local side of the workspace.</span></div>
             )}
           </div>
         </section>
 
-        <section className="commander-panel">
+        <section className={`commander-panel${activePanel === 'remote' ? ' commander-panel-active' : ''}`}>
           <header className="commander-panel-header">
             <div className="commander-panel-title">
               <div className="commander-panel-icon remote"><Server size={19} /></div>
               <div><h2>Remote repository</h2><span>{remoteFiles.length} file(s) · SHA-256 from server</span></div>
             </div>
-            <span className="commander-remote-state">{remoteLoading ? 'Refreshing…' : 'Connected'}</span>
+            <span className="commander-remote-state">{activePanel === 'remote' ? 'Active' : remoteLoading ? 'Refreshing…' : 'Connected'}</span>
           </header>
-          <div className="commander-list">
+          <div
+            ref={element => { listRefs.current.remote = element; }}
+            className="commander-list"
+            role="listbox"
+            tabIndex={0}
+            aria-label="Remote repository files"
+            onFocus={() => setActivePanel('remote')}
+            onKeyDown={event => handlePanelKeyDown('remote', event)}
+          >
             {visibleRemoteFiles.length > 0 ? visibleRemoteFiles.map(file => {
               const relativePath = getFilePath(file);
-              return <FileRow key={relativePath} file={file} status={getComparisonStatus(localByPath.get(relativePath), file)} />;
+              return <FileRow
+                key={relativePath}
+                file={file}
+                isCurrent={currentPaths.remote === relativePath}
+                onActivate={() => activateFile('remote', file)}
+                status={getComparisonStatus(localByPath.get(relativePath), file)}
+              />;
             }) : (
               <div className="commander-empty"><Server size={28} /><strong>{remoteLoading ? 'Loading remote files…' : 'Remote repository is empty'}</strong><span>Refresh the remote list after another client finishes an upload.</span></div>
             )}
@@ -557,7 +708,7 @@ export default function CommanderView({ authToken, onNotify, onRefresh }) {
         </section>
       </div>
 
-      <p className="commander-footnote"><strong>Compare all files</strong> rehashes every selected local file and refreshes the complete remote list. It never uploads file contents.</p>
+      <p className="commander-footnote"><strong>Tab</strong> switches the active file panel. <strong>F3</strong> views the current file. <strong>Compare all files</strong> rehashes every selected local file and refreshes the complete remote list. It never uploads file contents.</p>
     </div>
   );
 }

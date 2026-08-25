@@ -11,7 +11,7 @@ import { hashFile } from './utils/md5';
 import { DEFAULT_HASH_ALGORITHM } from './config';
 
 export default function App() {
-  const [activeTab, setActiveTab] = useState('repository');
+  const [activeTab, setActiveTab] = useState('commander');
   const [files, setFiles] = useState([]);
   const [stats, setStats] = useState(null);
   const [authToken, setAuthTokenState] = useState(getAuthToken);
@@ -193,6 +193,7 @@ export default function App() {
           <CommanderView
             authToken={authToken}
             onNotify={notify}
+            onPreview={(file) => setPreviewFile(file)}
             onRefresh={() => { fetchFiles(); fetchStats(); }}
           />
         )}
