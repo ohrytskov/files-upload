@@ -1579,7 +1579,7 @@ body {
   }
 
   .commander-file-row {
-    grid-template-columns: 22px 24px minmax(0, 1fr);
+    grid-template-columns: 22px 24px minmax(0, 1fr) auto;
   }
 
   .commander-file-row .commander-status {

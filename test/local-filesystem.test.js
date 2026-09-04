@@ -113,6 +113,10 @@ test('local copy rejects same directories, recursive destinations, and symbolic 
       copyLocalEntries({ sourcePath: source, destinationPath: path.join(source, 'folder'), entries: ['folder'] }),
       error => error.code === 'DESTINATION_INSIDE_SOURCE'
     );
+    await assert.rejects(
+      copyLocalEntries({ sourcePath: source, destinationPath: source, entries: ['folder'], overwrite: true }),
+      error => error.code === 'SAME_DIRECTORY'
+    );
 
     const linkPath = path.join(source, 'link');
     fs.symlinkSync(path.join(root, 'outside'), linkPath, 'file');

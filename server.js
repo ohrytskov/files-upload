@@ -439,7 +439,7 @@ function invalidateHashCache(...filePaths) {
 }
 
 function getLocalFilesystemErrorStatus(error) {
-  if (['INVALID_PATH', 'INVALID_ENTRY', 'INVALID_OPTION', 'NOT_DIRECTORY', 'SAME_DIRECTORY', 'DESTINATION_INSIDE_SOURCE'].includes(error?.code)) {
+  if (['INVALID_PATH', 'INVALID_ENTRY', 'INVALID_OPTION', 'NOT_DIRECTORY', 'SAME_DIRECTORY', 'DESTINATION_INSIDE_SOURCE', 'SYMBOLIC_LINK', 'UNSUPPORTED_ENTRY'].includes(error?.code)) {
     return 400;
   }
   if (error?.code === 'NOT_FOUND') return 404;
