@@ -191,9 +191,7 @@ export default function App() {
 
         {activeTab === 'commander' && (
           <CommanderView
-            authToken={authToken}
             onNotify={notify}
-            onPreview={(file) => setPreviewFile(file)}
             onRefresh={() => { fetchFiles(); fetchStats(); }}
           />
         )}
