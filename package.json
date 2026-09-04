@@ -13,7 +13,8 @@
     "test:coverage": "node --test --experimental-test-coverage \"test/*.test.js\"",
     "test:all": "npm run lint && npm test && npm run test:frontend && npm run build",
     "build": "vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "local-copy": "node bin/local-copy.js"
   },
   "keywords": [
     "file-upload",
