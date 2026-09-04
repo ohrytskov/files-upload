@@ -9,6 +9,7 @@ const config = require('./lib/config');
 const { initWebSocketServer, calculateServerHash } = require('./lib/ws-server');
 const { generateHashes, normalizeHashAlgorithm } = require('./lib/hash-generator');
 const { isInternalUploadFile, normalizeFilename, normalizeRelativePath, resolveSafePath } = require('./lib/path-utils');
+const { copyLocalEntries, listLocalDirectory } = require('./lib/local-filesystem');
 const {
   clearAuthCookie,
   createAuthMiddleware,
@@ -436,6 +437,55 @@ function invalidateHashCache(...filePaths) {
     hashCache.delete(`sha256:${resolved}`);
   });
 }
+
+function getLocalFilesystemErrorStatus(error) {
+  if (['INVALID_PATH', 'INVALID_ENTRY', 'INVALID_OPTION', 'NOT_DIRECTORY', 'SAME_DIRECTORY', 'DESTINATION_INSIDE_SOURCE'].includes(error?.code)) {
+    return 400;
+  }
+  if (error?.code === 'NOT_FOUND') return 404;
+  if (error?.code === 'PERMISSION_DENIED') return 403;
+  return 500;
+}
+
+function sendLocalFilesystemError(response, error, fallbackMessage) {
+  const status = getLocalFilesystemErrorStatus(error);
+  const message = status === 500 ? fallbackMessage : error.message;
+  return response.status(status).json({ error: message });
+}
+
+// Local Commander filesystem operations intentionally work outside the upload
+// directory so a server running on Windows can copy between drive letters and
+// a server running on Linux can copy to/from mounted removable media. The API
+// is behind the same authentication middleware as every other /api route.
+app.get('/api/local/list', async (req, res) => {
+  try {
+    const requestedPath = Array.isArray(req.query.path) ? null : (req.query.path || '.');
+    const listing = await listLocalDirectory(requestedPath);
+    res.json(listing);
+  } catch (error) {
+    sendLocalFilesystemError(res, error, 'Failed to list local directory');
+  }
+});
+
+app.post('/api/local/copy', mutationRateLimit, async (req, res) => {
+  const { sourcePath, destinationPath, entries, overwrite = false } = req.body || {};
+  try {
+    const result = await copyLocalEntries({
+      sourcePath,
+      destinationPath,
+      entries,
+      overwrite
+    });
+    res.json({
+      message: result.errors.length > 0
+        ? 'Local copy completed with errors'
+        : 'Local copy completed successfully',
+      ...result
+    });
+  } catch (error) {
+    sendLocalFilesystemError(res, error, 'Failed to copy local entries');
+  }
+});
 
 // 1. Get all files with metadata & verified hash when available
 app.get('/api/files', async (req, res) => {
