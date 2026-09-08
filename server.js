@@ -10,6 +10,8 @@ const { initWebSocketServer, calculateServerHash } = require('./lib/ws-server');
 const { generateHashes, normalizeHashAlgorithm } = require('./lib/hash-generator');
 const { isInternalUploadFile, normalizeFilename, normalizeRelativePath, resolveSafePath } = require('./lib/path-utils');
 const { copyLocalEntries, listLocalDirectory } = require('./lib/local-filesystem');
+const { copyManager } = require('./lib/copy-manager');
+const { ResumableUploadManager } = require('./lib/resumable-upload');
 const {
   clearAuthCookie,
   createAuthMiddleware,
@@ -27,6 +29,10 @@ const hashCache = new Map();
 let serverStateManager = null;
 let auditPromise = null;
 const PART_SUFFIX = '.cloudvault-part';
+const resumableUploadManager = new ResumableUploadManager({
+  uploadsDir: UPLOADS_DIR,
+  maxFileSize: config.httpUploadMaxFileSize
+});
 const ACTIVE_UPLOAD_EXTENSIONS = new Set([
   '.html', '.htm', '.xhtml', '.js', '.mjs', '.cjs', '.css', '.svg', '.xml'
 ]);
@@ -158,6 +164,10 @@ function handleHttpUpload(req, res, next) {
 }
 
 app.use(express.json({ limit: config.jsonBodyLimit }));
+app.use('/api/upload/resumable', express.raw({
+  type: ['application/octet-stream', 'application/offset+octet-stream', 'binary/octet-stream'],
+  limit: '64mb'
+}));
 const auth = createAuthMiddleware(AUTH_TOKEN);
 const DIST_DIR = path.join(__dirname, 'dist');
 if (fs.existsSync(DIST_DIR)) {
@@ -468,7 +478,24 @@ app.get('/api/local/list', async (req, res) => {
 });
 
 app.post('/api/local/copy', mutationRateLimit, async (req, res) => {
-  const { sourcePath, destinationPath, entries, overwrite = false } = req.body || {};
+  const { sourcePath, destinationPath, entries, overwrite = false, stateful = false, async: asyncMode = false } = req.body || {};
+
+  if (stateful || asyncMode) {
+    try {
+      const job = copyManager.createJob({ sourcePath, destinationPath, entries, overwrite });
+      job.start().catch(err => {
+        console.error('[CopyJob] Background copy job error:', err.message);
+      });
+      return res.status(202).json({
+        message: 'Local copy job started',
+        jobId: job.id,
+        job: job.getState()
+      });
+    } catch (error) {
+      return sendLocalFilesystemError(res, error, 'Failed to start local copy job');
+    }
+  }
+
   try {
     const result = await copyLocalEntries({
       sourcePath,
@@ -486,6 +513,212 @@ app.post('/api/local/copy', mutationRateLimit, async (req, res) => {
     sendLocalFilesystemError(res, error, 'Failed to copy local entries');
   }
 });
+
+app.get('/api/local/copy/jobs', (req, res) => {
+  res.json({ jobs: copyManager.listJobs() });
+});
+
+app.post('/api/local/copy/jobs', mutationRateLimit, (req, res) => {
+  const { sourcePath, destinationPath, entries, overwrite = false } = req.body || {};
+  try {
+    const job = copyManager.createJob({ sourcePath, destinationPath, entries, overwrite });
+    job.start().catch(err => {
+      console.error('[CopyJob] Background copy job error:', err.message);
+    });
+    res.status(202).json({
+      message: 'Local copy job started',
+      jobId: job.id,
+      job: job.getState()
+    });
+  } catch (error) {
+    sendLocalFilesystemError(res, error, 'Failed to start local copy job');
+  }
+});
+
+app.get('/api/local/copy/jobs/:jobId', (req, res) => {
+  const job = copyManager.getJob(req.params.jobId);
+  if (!job) return res.status(404).json({ error: 'Copy job not found' });
+  res.json(job.getState());
+});
+
+app.post('/api/local/copy/jobs/:jobId/suspend', (req, res) => {
+  const job = copyManager.getJob(req.params.jobId);
+  if (!job) return res.status(404).json({ error: 'Copy job not found' });
+  const state = job.suspend();
+  res.json({ message: 'Copy job suspended', job: state });
+});
+
+app.post('/api/local/copy/jobs/:jobId/resume', (req, res) => {
+  const job = copyManager.getJob(req.params.jobId);
+  if (!job) return res.status(404).json({ error: 'Copy job not found' });
+  const state = job.resume();
+  res.json({ message: 'Copy job resumed', job: state });
+});
+
+app.post('/api/local/copy/jobs/:jobId/cancel', (req, res) => {
+  const job = copyManager.getJob(req.params.jobId);
+  if (!job) return res.status(404).json({ error: 'Copy job not found' });
+  const state = job.cancel();
+  res.json({ message: 'Copy job cancelled', job: state });
+});
+
+// Stateful Resumable HTTP Upload Endpoints
+app.post('/api/upload/resumable/init', uploadRateLimit, (req, res) => {
+  const { filename, size, hashAlgorithm, expectedHash } = req.body || {};
+  try {
+    const session = resumableUploadManager.initSession({ filename, size, hashAlgorithm, expectedHash });
+    res.json(session);
+  } catch (err) {
+    const status = err.statusCode || 400;
+    res.status(status).json({ error: err.message, code: err.code });
+  }
+});
+
+app.put('/api/upload/resumable/:uploadId', uploadRateLimit, (req, res) => {
+  const uploadId = req.params.uploadId;
+  const rawOffset = req.headers['upload-offset'] ?? req.query?.offset ?? req.headers['x-upload-offset'];
+  const buffer = Buffer.isBuffer(req.body) ? req.body : Buffer.alloc(0);
+
+  try {
+    const result = resumableUploadManager.writeChunk(uploadId, rawOffset, buffer);
+    res.json(result);
+  } catch (err) {
+    const status = err.statusCode || 400;
+    res.status(status).json({ error: err.message, code: err.code });
+  }
+});
+
+app.get('/api/upload/resumable/:uploadId', (req, res) => {
+  try {
+    const session = resumableUploadManager.getSession(req.params.uploadId);
+    res.json({
+      uploadId: session.uploadId,
+      filename: session.filename,
+      size: session.size,
+      offset: session.offset,
+      hashAlgorithm: session.hashAlgorithm,
+      status: session.status,
+      createdAt: session.createdAt,
+      updatedAt: session.updatedAt
+    });
+  } catch (err) {
+    const status = err.statusCode || 404;
+    res.status(status).json({ error: err.message, code: err.code });
+  }
+});
+
+app.post('/api/upload/resumable/:uploadId/suspend', (req, res) => {
+  try {
+    const result = resumableUploadManager.suspendSession(req.params.uploadId);
+    res.json({ message: 'Upload session suspended', ...result });
+  } catch (err) {
+    const status = err.statusCode || 400;
+    res.status(status).json({ error: err.message, code: err.code });
+  }
+});
+
+app.post('/api/upload/resumable/:uploadId/resume', (req, res) => {
+  try {
+    const result = resumableUploadManager.resumeSession(req.params.uploadId);
+    res.json({ message: 'Upload session resumed', ...result });
+  } catch (err) {
+    const status = err.statusCode || 400;
+    res.status(status).json({ error: err.message, code: err.code });
+  }
+});
+
+app.post('/api/upload/resumable/:uploadId/finish', uploadRateLimit, async (req, res) => {
+  try {
+    const file = await resumableUploadManager.finishSession(req.params.uploadId, {
+      calculateServerHash,
+      reserveHttpUploadName,
+      serverStateManager,
+      invalidateHashCache,
+      getFileCategory,
+      encodeUploadUrl
+    });
+    res.json({ message: 'File uploaded and verified successfully', file });
+  } catch (err) {
+    const status = err.statusCode || 422;
+    res.status(status).json({ error: err.message, code: err.code });
+  }
+});
+
+app.delete('/api/upload/resumable/:uploadId', (req, res) => {
+  const cancelled = resumableUploadManager.cancelSession(req.params.uploadId);
+  if (cancelled) res.json({ message: 'Upload cancelled successfully' });
+  else res.status(404).json({ error: 'Upload session not found' });
+});
+
+// Stateful Resumable File Download Endpoint (with HTTP Range support)
+function handleFileDownload(req, res) {
+  const filename = req.params.filename;
+  let filePath;
+  let normalizedFilename;
+  try {
+    const resolved = resolveUploadFile(filename);
+    normalizedFilename = resolved.normalized;
+    filePath = resolved.resolved;
+  } catch (err) {
+    return res.status(400).json({ error: 'Invalid filename' });
+  }
+
+  let stats;
+  try {
+    stats = fs.lstatSync(filePath);
+  } catch (err) {
+    if (err.code === 'ENOENT') return res.status(404).json({ error: 'File not found' });
+    return res.status(500).json({ error: 'Failed to read file' });
+  }
+
+  if (stats.isSymbolicLink() || !stats.isFile()) {
+    return res.status(404).json({ error: 'File not found' });
+  }
+
+  const baseName = path.basename(filePath);
+  const repoFile = serverStateManager?.getRepositoryFile(normalizedFilename);
+  const hash = repoFile?.hash || null;
+  const hashAlgorithm = repoFile?.hashAlgorithm || 'sha256';
+
+  res.setHeader('Accept-Ranges', 'bytes');
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(baseName)}`);
+  res.setHeader('Content-Type', 'application/octet-stream');
+  if (hash) {
+    res.setHeader('X-File-Hash', hash);
+    res.setHeader('X-Hash-Algorithm', hashAlgorithm);
+  }
+  res.setHeader('X-Total-Size', String(stats.size));
+
+  const range = req.headers.range;
+  if (range) {
+    const match = /^bytes=(\d*)-(\d*)$/.exec(range.trim());
+    if (!match) {
+      res.setHeader('Content-Range', `bytes */${stats.size}`);
+      return res.status(416).end();
+    }
+
+    const start = match[1] ? parseInt(match[1], 10) : 0;
+    const end = match[2] ? parseInt(match[2], 10) : stats.size - 1;
+
+    if (isNaN(start) || isNaN(end) || start < 0 || end >= stats.size || start > end) {
+      res.setHeader('Content-Range', `bytes */${stats.size}`);
+      return res.status(416).end();
+    }
+
+    const chunkLength = end - start + 1;
+    res.status(206);
+    res.setHeader('Content-Range', `bytes ${start}-${end}/${stats.size}`);
+    res.setHeader('Content-Length', String(chunkLength));
+    fs.createReadStream(filePath, { start, end }).pipe(res);
+  } else {
+    res.setHeader('Content-Length', String(stats.size));
+    fs.createReadStream(filePath).pipe(res);
+  }
+}
+
+app.get('/api/files/:filename(*)/download', handleFileDownload);
+app.get('/api/download/:filename(*)', handleFileDownload);
 
 // 1. Get all files with metadata & verified hash when available
 app.get('/api/files', async (req, res) => {
