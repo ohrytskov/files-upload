@@ -1,6 +1,13 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Search, Grid, List, UploadCloud, Link as LinkIcon, Edit2, Download, Trash2, FileText, Image as ImageIcon, Code, Music, Video, Archive, File } from 'lucide-react';
+import {
+  Search, Grid, List, UploadCloud, Link as LinkIcon, Edit2, Download, Trash2,
+  FileText, Image as ImageIcon, Code, Music, Video, Archive, File,
+  Pause, Play, X, LoaderCircle
+} from 'lucide-react';
 import { REPOSITORY_PAGE_SIZE } from '../config';
+import { BrowserStatefulDownloader } from '../utils/browser-stateful-download';
+import { BrowserStatefulUploader } from '../utils/browser-stateful-uploader';
+import { getAuthToken } from '../utils/api';
 
 export default function FileRepository({ files, onRefresh, onPreview, onRename, onDelete, onUploadFiles, onNotify }) {
   const [search, setSearch] = useState('');
@@ -8,6 +15,10 @@ export default function FileRepository({ files, onRefresh, onPreview, onRename, 
   const [viewMode, setViewMode] = useState('grid');
   const [isDragOver, setIsDragOver] = useState(false);
   const [page, setPage] = useState(1);
+  const [uploadManager, setUploadManager] = useState(null);
+  const [uploadState, setUploadState] = useState(null);
+  const [downloadManager, setDownloadManager] = useState(null);
+  const [downloadState, setDownloadState] = useState(null);
   const PAGE_SIZE = REPOSITORY_PAGE_SIZE;
 
 function getDisplayedHash(file) {
@@ -62,9 +73,69 @@ function getDisplayedHash(file) {
     setPage(currentPage => Math.min(currentPage, pageCount));
   }, [pageCount]);
 
+  const startStatefulUpload = (selectedFiles) => {
+    if (!selectedFiles || selectedFiles.length === 0) {
+      onNotify?.('No files were selected for upload.', 'info');
+      return;
+    }
+
+    const token = getAuthToken();
+    const uploader = new BrowserStatefulUploader({
+      files: selectedFiles,
+      authToken: token,
+      onProgress: (state) => setUploadState({ ...state }),
+      onFileComplete: () => {
+        onRefresh?.();
+      },
+      onComplete: (state) => {
+        setUploadState({ ...state });
+        onNotify?.(`Stateful upload completed! Uploaded ${state.filesUploaded} file(s).`, 'success');
+        onRefresh?.();
+        setTimeout(() => {
+          setUploadManager(null);
+          setUploadState(null);
+        }, 3000);
+      },
+      onError: (err) => {
+        onNotify?.(`Upload error: ${err.message}`, 'error');
+      }
+    });
+
+    setUploadManager(uploader);
+    uploader.start();
+  };
+
+  const startStatefulDownload = (file) => {
+    if (downloadManager && downloadState && !['completed', 'failed', 'cancelled'].includes(downloadState.status)) {
+      onNotify?.('Another download is currently in progress.', 'warning');
+      return;
+    }
+
+    const token = getAuthToken();
+    const downloader = new BrowserStatefulDownloader({
+      file,
+      authToken: token,
+      onProgress: (state) => setDownloadState({ ...state }),
+      onComplete: (state) => {
+        setDownloadState({ ...state });
+        onNotify?.(`Downloaded "${file.name}" successfully!`, 'success');
+        setTimeout(() => {
+          setDownloadManager(null);
+          setDownloadState(null);
+        }, 3000);
+      },
+      onError: (err) => {
+        onNotify?.(`Download error: ${err.message}`, 'error');
+      }
+    });
+
+    setDownloadManager(downloader);
+    downloader.start();
+  };
+
   const handleFileInputChange = (e) => {
     if (e.target.files && e.target.files.length > 0) {
-      onUploadFiles(e.target.files);
+      startStatefulUpload(e.target.files);
     } else {
       onNotify?.('No files were selected for upload.', 'info');
     }
@@ -74,7 +145,7 @@ function getDisplayedHash(file) {
     e.preventDefault();
     setIsDragOver(false);
     if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
-      onUploadFiles(e.dataTransfer.files);
+      startStatefulUpload(e.dataTransfer.files);
     } else {
       onNotify?.('Drop one or more files to upload them.', 'warning');
     }
@@ -206,9 +277,9 @@ function getDisplayedHash(file) {
               <button className="file-action-btn" title="Rename" onClick={() => onRename(file)}>
                 <Edit2 size={16} />
               </button>
-              <a href={file.url} download className="file-action-btn" title="Download">
+              <button className="file-action-btn" title="Download (resumable)" onClick={() => startStatefulDownload(file)}>
                 <Download size={16} />
-              </a>
+              </button>
               <button className="file-action-btn" title="Delete" onClick={() => onDelete(file.name)}>
                 <Trash2 size={16} />
               </button>
@@ -234,6 +305,122 @@ function getDisplayedHash(file) {
           <button className="btn btn-secondary" disabled={page >= pageCount} onClick={() => setPage(current => current + 1)}>
             Next
           </button>
+        </div>
+      )}
+
+      {/* ── Stateful Upload Progress Card ───────────────────────────────── */}
+      {uploadState && (
+        <div className="stateful-transfer-card">
+          <div className="transfer-header">
+            <LoaderCircle size={16} className={uploadState.status === 'uploading' ? 'transfer-spin' : ''} />
+            <span className="transfer-title">
+              Uploading {uploadState.currentFile ? `"${uploadState.currentFile}"` : 'files…'}
+            </span>
+            <span className="transfer-status-badge">{uploadState.status}</span>
+          </div>
+
+          <div className="transfer-progress-bar-wrap">
+            <div
+              className="transfer-progress-bar"
+              style={{ width: `${Math.round((uploadState.overallProgress || 0) * 100)}%` }}
+            />
+          </div>
+          <div className="transfer-stats">
+            <span>{formatBytes(uploadState.bytesUploaded || 0)} / {formatBytes(uploadState.totalBytes || 0)}</span>
+            <span>File {uploadState.fileIndex || 0} of {uploadState.totalFiles || 0}</span>
+          </div>
+
+          <div className="transfer-actions">
+            {uploadState.status === 'uploading' && (
+              <button
+                className="transfer-btn"
+                title="Pause"
+                onClick={() => { uploadManager?.suspend(); }}
+              >
+                <Pause size={14} /> Pause
+              </button>
+            )}
+            {uploadState.status === 'suspended' && (
+              <button
+                className="transfer-btn"
+                title="Resume"
+                onClick={() => { uploadManager?.resume(); }}
+              >
+                <Play size={14} /> Resume
+              </button>
+            )}
+            <button
+              className="transfer-btn transfer-btn-cancel"
+              title="Cancel"
+              onClick={() => {
+                uploadManager?.cancel();
+                setUploadManager(null);
+                setUploadState(null);
+              }}
+            >
+              <X size={14} /> Cancel
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* ── Stateful Download Progress Card ─────────────────────────────── */}
+      {downloadState && (
+        <div className="stateful-transfer-card">
+          <div className="transfer-header">
+            <Download size={16} className={downloadState.status === 'downloading' ? 'transfer-spin' : ''} />
+            <span className="transfer-title">
+              {downloadState.status === 'completed'
+                ? `Downloaded "${downloadState.filename || 'file'}"`
+                : `Downloading "${downloadState.filename || 'file'}"…`}
+            </span>
+            <span className="transfer-status-badge">{downloadState.status}</span>
+          </div>
+
+          <div className="transfer-progress-bar-wrap">
+            <div
+              className="transfer-progress-bar"
+              style={{ width: `${Math.round((downloadState.progress || 0) * 100)}%` }}
+            />
+          </div>
+          <div className="transfer-stats">
+            <span>{formatBytes(downloadState.bytesDownloaded || 0)} / {formatBytes(downloadState.totalBytes || 0)}</span>
+            <span>{Math.round((downloadState.progress || 0) * 100)}%</span>
+          </div>
+
+          <div className="transfer-actions">
+            {downloadState.status === 'downloading' && (
+              <button
+                className="transfer-btn"
+                title="Pause"
+                onClick={() => { downloadManager?.suspend(); }}
+              >
+                <Pause size={14} /> Pause
+              </button>
+            )}
+            {downloadState.status === 'suspended' && (
+              <button
+                className="transfer-btn"
+                title="Resume"
+                onClick={() => { downloadManager?.resume(); }}
+              >
+                <Play size={14} /> Resume
+              </button>
+            )}
+            {!['completed', 'failed', 'cancelled'].includes(downloadState.status) && (
+              <button
+                className="transfer-btn transfer-btn-cancel"
+                title="Cancel"
+                onClick={() => {
+                  downloadManager?.cancel();
+                  setDownloadManager(null);
+                  setDownloadState(null);
+                }}
+              >
+                <X size={14} /> Cancel
+              </button>
+            )}
+          </div>
         </div>
       )}
     </div>

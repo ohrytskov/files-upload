@@ -14,7 +14,8 @@
     "test:all": "npm run lint && npm test && npm run test:frontend && npm run build",
     "build": "vite build",
     "preview": "vite preview",
-    "local-copy": "node bin/local-copy.js"
+    "local-copy": "node bin/local-copy.js",
+    "download": "node bin/download-cli.js"
   },
   "keywords": [
     "file-upload",

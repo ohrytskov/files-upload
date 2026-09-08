@@ -10,8 +10,11 @@ import {
   FolderOpen,
   HardDrive,
   LoaderCircle,
+  Pause,
+  Play,
   RefreshCw,
-  Search
+  Search,
+  X
 } from 'lucide-react';
 import { apiFetch } from '../utils/api';
 
@@ -242,8 +245,21 @@ export default function CommanderView({ onNotify, onRefresh }) {
   const [replaceExisting, setReplaceExisting] = useState(false);
   const [loadingPanel, setLoadingPanel] = useState({ left: false, right: false });
   const [copyState, setCopyState] = useState(null);
+  const [copyJob, setCopyJob] = useState(null);
   const requestIds = useRef({ left: 0, right: 0 });
   const listRefs = useRef({ left: null, right: null });
+  const pollingTimerRef = useRef(null);
+
+  const stopPolling = () => {
+    if (pollingTimerRef.current) {
+      clearInterval(pollingTimerRef.current);
+      pollingTimerRef.current = null;
+    }
+  };
+
+  useEffect(() => {
+    return () => stopPolling();
+  }, []);
 
   const query = search.trim().toLowerCase();
   const visibleEntries = useMemo(() => Object.fromEntries(
@@ -252,7 +268,7 @@ export default function CommanderView({ onNotify, onRefresh }) {
       panels[panelKey].entries.filter(entry => !query || entry.name.toLowerCase().includes(query))
     ])
   ), [panels, query]);
-  const isBusy = Object.values(loadingPanel).some(Boolean) || copyState?.phase === 'copying';
+  const isBusy = Object.values(loadingPanel).some(Boolean) || copyState?.phase === 'copying' || copyJob?.status === 'running';
   const selectedCount = PANEL_KEYS.reduce((total, panelKey) => total + panels[panelKey].selectedNames.size, 0);
 
   const updatePanel = (panelKey, updates) => {
@@ -366,6 +382,50 @@ export default function CommanderView({ onNotify, onRefresh }) {
     }
   };
 
+  const handleSuspendCopy = async () => {
+    if (!copyJob?.id) return;
+    try {
+      const res = await apiFetch(`/api/local/copy/jobs/${copyJob.id}/suspend`, { method: 'POST' });
+      if (res.ok) {
+        const data = await res.json();
+        setCopyJob(data.job);
+        onNotify?.('Copy suspended (paused). Click Resume when ready.', 'info');
+      }
+    } catch (e) {
+      onNotify?.('Could not suspend copy', 'error');
+    }
+  };
+
+  const handleResumeCopy = async () => {
+    if (!copyJob?.id) return;
+    try {
+      const res = await apiFetch(`/api/local/copy/jobs/${copyJob.id}/resume`, { method: 'POST' });
+      if (res.ok) {
+        const data = await res.json();
+        setCopyJob(data.job);
+        onNotify?.('Copy resumed.', 'success');
+      }
+    } catch (e) {
+      onNotify?.('Could not resume copy', 'error');
+    }
+  };
+
+  const handleCancelCopy = async () => {
+    if (!copyJob?.id) return;
+    try {
+      const res = await apiFetch(`/api/local/copy/jobs/${copyJob.id}/cancel`, { method: 'POST' });
+      if (res.ok) {
+        const data = await res.json();
+        setCopyJob(data.job);
+        stopPolling();
+        setCopyState(null);
+        onNotify?.('Copy operation cancelled.', 'info');
+      }
+    } catch (e) {
+      onNotify?.('Could not cancel copy', 'error');
+    }
+  };
+
   const copyFrom = async sourceKey => {
     const destinationKey = sourceKey === 'left' ? 'right' : 'left';
     const source = panels[sourceKey];
@@ -385,7 +445,9 @@ export default function CommanderView({ onNotify, onRefresh }) {
     if (isBusy) return;
 
     setActivePanel(sourceKey);
+    stopPolling();
     setCopyState({ phase: 'copying', sourceKey, destinationKey, entries });
+
     try {
       const response = await apiFetch('/api/local/copy', {
         method: 'POST',
@@ -394,35 +456,63 @@ export default function CommanderView({ onNotify, onRefresh }) {
           sourcePath: source.path,
           destinationPath: destination.path,
           entries,
-          overwrite: replaceExisting
+          overwrite: replaceExisting,
+          stateful: true
         })
       });
       const data = await response.json().catch(() => ({}));
-      if (!response.ok) throw new Error(data.error || 'Could not copy local entries');
+      if (!response.ok) throw new Error(data.error || 'Could not start local copy');
 
-      await loadPanel(destinationKey, destination.path, false);
-      setCopyState({ phase: 'complete', sourceKey, destinationKey, ...data });
-      const copiedCount = Array.isArray(data.copied) ? data.copied.length : 0;
-      const errorCount = Array.isArray(data.errors) ? data.errors.length : 0;
-      if (errorCount > 0) {
-        onNotify?.(`Copied ${copiedCount} item(s); ${errorCount} item(s) need attention.`, copiedCount ? 'warning' : 'error');
-      } else {
-        onNotify?.(`Copied ${data.filesCopied || 0} file(s) to the ${destinationKey} panel.`, 'success');
-      }
-      onRefresh?.();
+      const jobId = data.jobId;
+      setCopyJob(data.job);
+
+      pollingTimerRef.current = setInterval(async () => {
+        try {
+          const res = await apiFetch(`/api/local/copy/jobs/${jobId}`);
+          if (!res.ok) return;
+          const currentJob = await res.json();
+          setCopyJob(currentJob);
+
+          if (currentJob.status === 'completed') {
+            stopPolling();
+            await loadPanel(destinationKey, destination.path, false);
+            setCopyState({ phase: 'complete', sourceKey, destinationKey, ...currentJob });
+            const copiedCount = Array.isArray(currentJob.copied) ? currentJob.copied.length : 0;
+            const errorCount = Array.isArray(currentJob.errors) ? currentJob.errors.length : 0;
+            if (errorCount > 0) {
+              onNotify?.(`Copied ${copiedCount} item(s); ${errorCount} item(s) need attention.`, copiedCount ? 'warning' : 'error');
+            } else {
+              onNotify?.(`Copied ${currentJob.filesCopied || 0} file(s) to the ${destinationKey} panel.`, 'success');
+            }
+            onRefresh?.();
+          } else if (currentJob.status === 'failed') {
+            stopPolling();
+            setCopyState({ phase: 'error', sourceKey, destinationKey, message: currentJob.error || 'Copy failed' });
+            onNotify?.(`Copy failed: ${currentJob.error || 'Unknown error'}`, 'error');
+          } else if (currentJob.status === 'cancelled') {
+            stopPolling();
+            setCopyState({ phase: 'error', sourceKey, destinationKey, message: 'Copy cancelled' });
+            onNotify?.('Copy was cancelled.', 'info');
+          }
+        } catch (e) {}
+      }, 350);
     } catch (error) {
       setCopyState({ phase: 'error', sourceKey, destinationKey, message: error.message });
       onNotify?.(error.message || 'Could not copy local entries', 'error');
     }
   };
 
-  const copyStatus = copyState?.phase === 'copying'
-    ? `Copying ${copyState.entries.length} item(s) from ${copyState.sourceKey} to ${copyState.destinationKey}…`
-    : copyState?.phase === 'error'
-      ? copyState.message
-      : copyState?.phase === 'complete'
-        ? `${copyState.copied?.length || 0} item(s) copied · ${copyState.errors?.length || 0} error(s)`
-        : 'Select entries in either panel and copy them to the other directory.';
+  const copyStatus = copyJob?.status === 'suspended'
+    ? `Copy suspended (paused). Click Resume to continue copying.`
+    : copyJob?.status === 'running'
+      ? `Copying ${copyJob.totalFiles} item(s)... ${copyJob.overallPercent}%`
+      : copyState?.phase === 'copying'
+        ? `Copying ${copyState.entries.length} item(s) from ${copyState.sourceKey} to ${copyState.destinationKey}…`
+        : copyState?.phase === 'error'
+          ? copyState.message
+          : copyState?.phase === 'complete'
+            ? `${copyState.copied?.length || 0} item(s) copied · ${copyState.errors?.length || 0} error(s)`
+            : 'Select entries in either panel and copy them to the other directory.';
 
   return (
     <div className="commander-view">
@@ -460,6 +550,49 @@ export default function CommanderView({ onNotify, onRefresh }) {
           </button>
         </div>
       </section>
+
+      {copyJob && ['running', 'suspended'].includes(copyJob.status) && (
+        <div className={`commander-transfer-card ${copyJob.status === 'suspended' ? 'suspended' : ''}`}>
+          <div className="transfer-header">
+            <div className="transfer-title">
+              {copyJob.status === 'running' && <LoaderCircle size={18} className="animate-spin text-indigo-400" />}
+              {copyJob.status === 'suspended' && <Pause size={18} className="text-amber-400" />}
+              <strong>
+                {copyJob.status === 'running' ? 'Copying files...' : 'Copy suspended (paused)'}
+              </strong>
+              <span className="transfer-meta">
+                {copyJob.filesCopied} / {copyJob.totalFiles} file(s) · {formatBytes(copyJob.bytesCopied)} / {formatBytes(copyJob.totalBytes)} ({copyJob.overallPercent}%)
+              </span>
+            </div>
+            <div className="transfer-controls">
+              {copyJob.status === 'running' && (
+                <button type="button" className="btn btn-secondary btn-sm" onClick={handleSuspendCopy} title="Suspend (pause) copy">
+                  <Pause size={14} /> Suspend
+                </button>
+              )}
+              {copyJob.status === 'suspended' && (
+                <button type="button" className="btn btn-primary btn-sm" onClick={handleResumeCopy} title="Resume copy">
+                  <Play size={14} /> Resume
+                </button>
+              )}
+              <button type="button" className="btn btn-secondary btn-sm" onClick={handleCancelCopy} title="Cancel copy">
+                <X size={14} /> Cancel
+              </button>
+            </div>
+          </div>
+
+          <div className="transfer-progress-bar">
+            <div className="transfer-progress-fill" style={{ width: `${copyJob.overallPercent}%` }} />
+          </div>
+
+          {copyJob.currentFile && (
+            <div className="transfer-file-details">
+              <span title={copyJob.currentFile}>Current: <code>{copyJob.currentFile}</code> ({copyJob.filePercent}%)</span>
+              <span>Speed: {copyJob.speedMB} MB/s · ETA: {copyJob.eta}</span>
+            </div>
+          )}
+        </div>
+      )}
 
       <div className={`commander-operation-note${copyState?.phase === 'error' ? ' commander-operation-note-error' : ''}`}>
         {copyState?.phase === 'copying' ? <LoaderCircle size={16} className="animate-spin" /> : copyState?.phase === 'error' ? <CircleAlert size={16} /> : <CheckCircle2 size={16} />}
