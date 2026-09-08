@@ -1,10 +1,30 @@
+# Dependencies
 node_modules/
+
+# Local environment and runtime state
+.env
+.env.*
+!.env.example
 state.json
+*.sqlite
+*.sqlite-*
 *.tmp
 *.cloudvault-part
 *.cloudvault-http-part
 uploads/server_state.json
-uploads/cloudvault.sqlite*
-.env
-.env.*
-!.env.example
+
+# User uploads are runtime data. Keep only the small, intentional demo fixtures
+# below under version control.
+uploads/**
+!uploads/config_schema.json
+!uploads/hero_banner.jpg
+!uploads/sample_script.js
+!uploads/welcome.md
+
+# Tooling and operating-system noise
+coverage/
+.vite/
+*.log
+npm-debug.log*
+.DS_Store
+Thumbs.db

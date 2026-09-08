@@ -2,7 +2,7 @@
 
 > This document describes the repository as reviewed on 2026-08-02 and is retained for history. It is superseded by the current implementation and verification results on `main`; the previously listed path-traversal, arbitrary-scan, dummy-browser-chunk, resume-offset, missing-auth, legacy-frontend, and per-chunk-state-write findings have since been addressed.
 
-> Review date: 2026-08-02 · Repo: `/var/www/hello/my/files-area/files-upload`
+> Review date: 2026-08-02 · Repo: CloudVault `files-upload`
 
 ---
 
@@ -66,7 +66,7 @@ graph TD
 
 ### Backend Modules
 
-#### [`server.js`](file:///var/www/hello/my/files-area/files-upload/server.js) — 256 lines
+#### [`server.js`](server.js) — 256 lines
 Express server with REST API + WebSocket upgrade handler.
 
 | Item | Assessment |
@@ -81,7 +81,7 @@ Express server with REST API + WebSocket upgrade handler.
 | 💡 Suggestion | Cache MD5 hashes or compute lazily, not on every `GET /api/files` call |
 | 💡 Suggestion | Validate filenames contain no path separators (`/`, `\`, `..`) |
 
-#### [`lib/hash-generator.js`](file:///var/www/hello/my/files-area/files-upload/lib/hash-generator.js) — 152 lines
+#### [`lib/hash-generator.js`](lib/hash-generator.js) — 152 lines
 Streaming MD5 hash generator with path normalization.
 
 | Item | Assessment |
@@ -91,7 +91,7 @@ Streaming MD5 hash generator with path normalization.
 | ⚠️ Note | `normalizePath` is computed (L70) but only stored in the return object — the actual `fs.existsSync` check (L72) uses the raw `sourcePath`, which is correct |
 | 💡 Suggestion | Could use `crypto.createHash('sha256')` as configurable option since MD5 is cryptographically broken |
 
-#### [`lib/state-manager.js`](file:///var/www/hello/my/files-area/files-upload/lib/state-manager.js) — 191 lines
+#### [`lib/state-manager.js`](lib/state-manager.js) — 191 lines
 Persistent JSON state file manager for upload session tracking.
 
 | Item | Assessment |
@@ -100,7 +100,7 @@ Persistent JSON state file manager for upload session tracking.
 | ⚠️ Performance | `saveState()` is called on every `updateFile()` call (L129). During chunked uploads this means a synchronous JSON write to disk **per chunk** (every 256KB). For large uploads this creates heavy I/O |
 | 💡 Suggestion | Debounce or batch state saves — e.g. save every N chunks or every 2 seconds |
 
-#### [`lib/ws-server.js`](file:///var/www/hello/my/files-area/files-upload/lib/ws-server.js) — 307 lines
+#### [`lib/ws-server.js`](lib/ws-server.js) — 307 lines
 WebSocket upload server handling chunked file reception, MD5 verification, and audit.
 
 | Item | Assessment |
@@ -111,7 +111,7 @@ WebSocket upload server handling chunked file reception, MD5 verification, and a
 | ⚠️ Memory | **L140**: `Buffer.from(data, 'base64')` — each 256KB chunk is sent as base64 over JSON, inflating payload by ~33%. For large files this is significant overhead |
 | 💡 Suggestion | Use WebSocket binary frames instead of JSON+base64 for chunk data |
 
-#### [`lib/ws-client.js`](file:///var/www/hello/my/files-area/files-upload/lib/ws-client.js) — 352 lines
+#### [`lib/ws-client.js`](lib/ws-client.js) — 352 lines
 Node.js CLI WebSocket uploader client.
 
 | Item | Assessment |
@@ -120,7 +120,7 @@ Node.js CLI WebSocket uploader client.
 | 🐛 Bug | **L117–120**: Reconnect logic calls `connectWebSocket()` after 3s, but after reconnecting there's no `INIT_SESSION` resend — the new socket will receive messages but the server won't have an active session context |
 | 💡 Suggestion | On reconnect, automatically re-send `INIT_SESSION` |
 
-#### [`bin/upload-cli.js`](file:///var/www/hello/my/files-area/files-upload/bin/upload-cli.js) — 100 lines
+#### [`bin/upload-cli.js`](bin/upload-cli.js) — 100 lines
 CLI entry point for batch uploads.
 
 | Item | Assessment |
@@ -132,22 +132,22 @@ CLI entry point for batch uploads.
 
 ### React Frontend (src/)
 
-#### [`src/App.jsx`](file:///var/www/hello/my/files-area/files-upload/src/App.jsx) — 127 lines
+#### [`src/App.jsx`](src/App.jsx) — 127 lines
 
 | Item | Assessment |
 |---|---|
 | ✅ Strengths | Clean tab-based routing, proper state lifting for modals, `useEffect` for initial data fetch |
 | 💡 Suggestion | File upload success should show a toast notification instead of silently refreshing |
 
-#### [`src/components/WebSocketUploader.jsx`](file:///var/www/hello/my/files-area/files-upload/src/components/WebSocketUploader.jsx) — 390 lines
+#### [`src/components/WebSocketUploader.jsx`](src/components/WebSocketUploader.jsx) — 390 lines
 
 | Item | Assessment |
 |---|---|
 | 🐛 **Critical Bug** | **L187–198**: `sendChunk()` creates **dummy data** (`new Array(end - offset + 1).join('x')`) instead of reading actual file contents. The browser `WebSocketUploader` cannot access the local filesystem — it sends garbage bytes to the server. The uploaded files will be filled with the character `'x'` and will **always fail MD5 verification** |
-| ⚠️ Design | This component is a browser-side UI but the actual chunked upload requires filesystem access (Node.js `fs.readSync`). The browser Web API has no way to read from arbitrary local paths like `D:\marriage`. This entire tab only works correctly via the CLI client |
+| ⚠️ Design | This component is a browser-side UI but the actual chunked upload requires filesystem access (Node.js `fs.readSync`). The browser Web API has no way to read from arbitrary local paths like `D:\source-folder`. This entire tab only works correctly via the CLI client |
 | 💡 Fix Path | For browser uploads, use `<input type="file">` + `File.slice()` to read real chunks via `FileReader` API, or redesign this tab as a monitoring dashboard for CLI uploads only |
 
-#### [`src/components/PreviewModal.jsx`](file:///var/www/hello/my/files-area/files-upload/src/components/PreviewModal.jsx) — 59 lines
+#### [`src/components/PreviewModal.jsx`](src/components/PreviewModal.jsx) — 59 lines
 
 | Item | Assessment |
 |---|---|
@@ -155,7 +155,7 @@ CLI entry point for batch uploads.
 | ✅ Fine | Image/audio/video preview correctly uses element tags |
 | 💡 Suggestion | Missing text/code file preview (the legacy `public/app.js` had this) |
 
-#### [`src/components/FileRepository.jsx`](file:///var/www/hello/my/files-area/files-upload/src/components/FileRepository.jsx) — 185 lines
+#### [`src/components/FileRepository.jsx`](src/components/FileRepository.jsx) — 185 lines
 
 | Item | Assessment |
 |---|---|
@@ -184,9 +184,9 @@ CLI entry point for batch uploads.
 
 | Severity | Issue | Location |
 |---|---|---|
-| 🔴 **Critical** | `POST /api/hash/scan` scans arbitrary server filesystem paths from client input | [server.js:218](file:///var/www/hello/my/files-area/files-upload/server.js#L218) |
-| 🔴 **Critical** | Path traversal on delete/rename — `../` in filename escapes uploads directory | [server.js:173](file:///var/www/hello/my/files-area/files-upload/server.js#L173), [server.js:190](file:///var/www/hello/my/files-area/files-upload/server.js#L190) |
-| 🟠 **High** | WebSocket `relativePath` not sanitized — can write files outside uploads dir | [ws-server.js:69](file:///var/www/hello/my/files-area/files-upload/lib/ws-server.js#L69) |
+| 🔴 **Critical** | `POST /api/hash/scan` scans arbitrary server filesystem paths from client input | [server.js:218](server.js#L218) |
+| 🔴 **Critical** | Path traversal on delete/rename — `../` in filename escapes uploads directory | [server.js:173](server.js#L173), [server.js:190](server.js#L190) |
+| 🟠 **High** | WebSocket `relativePath` not sanitized — can write files outside uploads dir | [ws-server.js:69](lib/ws-server.js#L69) |
 | 🟡 **Medium** | No authentication/authorization on any endpoint | All API routes |
 | 🟡 **Medium** | No rate limiting on upload endpoints | server.js |
 
@@ -196,12 +196,12 @@ CLI entry point for batch uploads.
 
 | Severity | Bug | Location |
 |---|---|---|
-| 🔴 **Critical** | Browser WebSocket uploader sends dummy `'x'` bytes instead of real file data | [WebSocketUploader.jsx:192](file:///var/www/hello/my/files-area/files-upload/src/components/WebSocketUploader.jsx#L192) |
-| 🟠 **High** | `createWriteStream` with `flags: 'a'` ignores `start` offset — resume may corrupt files | [ws-server.js:142](file:///var/www/hello/my/files-area/files-upload/lib/ws-server.js#L142) |
-| 🟠 **High** | MD5 computed on every `GET /api/files` request — O(n×size) blocking I/O | [server.js:86](file:///var/www/hello/my/files-area/files-upload/server.js#L86) |
-| 🟡 **Medium** | WebSocket reconnect doesn't resend `INIT_SESSION` | [ws-client.js:117](file:///var/www/hello/my/files-area/files-upload/lib/ws-client.js#L117) |
-| 🟢 **Low** | CSS syntax error in PreviewModal inline style | [PreviewModal.jsx:42](file:///var/www/hello/my/files-area/files-upload/src/components/PreviewModal.jsx#L42) |
-| 🟢 **Low** | State saves on every chunk (256KB) — excessive disk I/O during uploads | [state-manager.js:129](file:///var/www/hello/my/files-area/files-upload/lib/state-manager.js#L129) |
+| 🔴 **Critical** | Browser WebSocket uploader sends dummy `'x'` bytes instead of real file data | [WebSocketUploader.jsx:192](src/components/WebSocketUploader.jsx#L192) |
+| 🟠 **High** | `createWriteStream` with `flags: 'a'` ignores `start` offset — resume may corrupt files | [ws-server.js:142](lib/ws-server.js#L142) |
+| 🟠 **High** | MD5 computed on every `GET /api/files` request — O(n×filesize) blocking I/O | [server.js:86](server.js#L86) |
+| 🟡 **Medium** | WebSocket reconnect doesn't resend `INIT_SESSION` | [ws-client.js:117](lib/ws-client.js#L117) |
+| 🟢 **Low** | CSS syntax error in PreviewModal inline style | [PreviewModal.jsx:42](src/components/PreviewModal.jsx#L42) |
+| 🟢 **Low** | State saves on every chunk (256KB) — excessive disk I/O during uploads | [state-manager.js:129](lib/state-manager.js#L129) |
 
 ---
 
@@ -209,7 +209,7 @@ CLI entry point for batch uploads.
 
 - **CLI upload pipeline** (`bin/upload-cli.js` → `lib/ws-client.js` → server) is well-designed and tested — verified upload + resumption + audit all function correctly
 - **Atomic state persistence** via temp-file-then-rename pattern in `StateManager`
-- **Cross-platform path normalization** for Windows 11 paths (`D:\marriage` → `marriage`)
+- **Cross-platform path normalization** for Windows 11 paths (`D:\source-folder` → `source-folder`)
 - **Hash verification protocol** — client MD5 → upload → server MD5 → compare → audit — is solid
 - **React component architecture** is clean with proper state lifting
 - **Vite proxy configuration** correctly routes API, uploads, and WebSocket traffic

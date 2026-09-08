@@ -47,7 +47,7 @@ Usage:
   node bin/upload-cli.js --path <TargetFolderPath> [options]
 
 Options:
-  -p, --path <path>      Target folder path (Windows 11 paths supported e.g. "D:\\folder" or Linux paths)
+  -p, --path <path>      Target folder path (Windows 11 paths supported e.g. "D:\\source-folder" or Linux paths)
   -s, --server <url>     Remote/Local WebSocket server URL (default: ws://localhost:3001/ws/upload)
   -o, --output <file>    Optional path to save standard hashes.txt manifest
   --state <file>         Persistent state JSON path (default: state.json for resuming)
@@ -55,8 +55,8 @@ Options:
   --algorithm <name>     Hash algorithm: sha256 (default) or md5
 
 Examples:
-  node bin/upload-cli.js -p "D:\\marriage" -s "ws://my-remote-server.com:3000/ws/upload"
-  node bin/upload-cli.js -p "/var/www/hello/my/files-area" -o "hashes.txt"
+  node bin/upload-cli.js -p "D:\\source-folder" -s "ws://my-remote-server.com:3000/ws/upload"
+  node bin/upload-cli.js -p "/path/to/source-folder" -o "hashes.txt"
 `);
     process.exit(1);
   }
