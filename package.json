@@ -14,6 +14,7 @@
     "test:all": "npm run lint && npm test && npm run test:frontend && npm run build",
     "build": "vite build",
     "preview": "vite preview",
+    "deploy": "node bin/deploy.js",
     "local-copy": "node bin/local-copy.js",
     "download": "node bin/download-cli.js"
   },

@@ -50,8 +50,8 @@ The checked-in files under `uploads/` are small demo fixtures. New uploads, SQLi
 ### 1. Install & Start Backend
 ```bash
 npm install
-npm run build
-npm start
+npm run deploy    # Validates environment, runs tests, builds frontend, initializes SQLite
+npm start         # Or deploy and start in one step: npm run deploy -- --start
 ```
 
 Backend configuration is loaded from `.env`. The checked-in `.env.example` keeps the backend on `127.0.0.1:3001`, while the frontend is exposed separately on port `3000`. Set a non-empty `CLOUDVAULT_AUTH_TOKEN` before starting a network deployment.
@@ -127,6 +127,24 @@ This project is licensed under the ISC License. See [LICENSE](LICENSE).
 
 ## 🛠️ CLI Usage & Options
 
+### Production Deployment CLI
+```text
+Usage: node bin/deploy.js [options]
+
+Options:
+      --skip-tests       Skip linting and automated test runs
+      --skip-build       Skip frontend Vite build (use existing dist/)
+      --clean            Clean dist/ directory before building
+      --dry-run          Validate environment and config without building or starting
+      --start            Start production server immediately after deployment
+  -p, --port <port>      Override server port (default from .env or 3001)
+      --host <host>      Override server host (default from .env or 127.0.0.1)
+      --token <token>    Override CLOUDVAULT_AUTH_TOKEN
+      --env <file>       Custom .env file path
+  -h, --help             Show this help message
+```
+
+### WebSocket Batch Uploader CLI
 ```text
 Usage: node bin/upload-cli.js --path <TargetFolderPath> [options]
 
@@ -146,6 +164,9 @@ Options:
 ```text
 files-upload/
 ├── bin/
+│   ├── deploy.js           # Production deployment pipeline & pre-flight checker
+│   ├── download-cli.js     # Stateful chunked download CLI
+│   ├── local-copy.js       # Local filesystem copy engine
 │   └── upload-cli.js       # Command line batch uploader tool
 ├── lib/
 │   ├── hash-generator.js   # MD5/SHA-256 streaming hash generator
