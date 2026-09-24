@@ -11,6 +11,14 @@ Commander View operates on the filesystem of the machine running CloudVault. It 
 
 Directories are copied recursively. Symbolic links and special filesystem entries are shown but are not copied.
 
+## Copy PDFs as PNG
+
+Select one or more PDF files in the active panel and choose **Copy as...**. CloudVault converts every page to a 300 DPI PNG and writes the images to the opposite panel's current directory. Output names use the pattern `<pdf-name>_page_001.png`.
+
+Existing PNG files are protected by default. Enable **Replace existing files** to overwrite them.
+
+Preview a PNG by double-clicking it or selecting one PNG and choosing **Preview PNG**. The preview fetches the original image through the authenticated server API and supports fit-to-window and 100% pixel-size views.
+
 ## CLI
 
 The same copy engine is available without the web UI:

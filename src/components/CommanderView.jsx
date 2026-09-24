@@ -5,6 +5,7 @@ import {
   CheckCircle2,
   ChevronUp,
   CircleAlert,
+  Eye,
   File,
   Folder,
   FolderOpen,
@@ -17,6 +18,7 @@ import {
   X
 } from 'lucide-react';
 import { apiFetch } from '../utils/api';
+import ServerPngPreview from './ServerPngPreview';
 
 const PANEL_KEYS = ['left', 'right'];
 
@@ -61,7 +63,15 @@ function isCopyable(entry) {
   return entry.type === 'file' || entry.type === 'directory';
 }
 
-function EntryRow({ entry, selected, current, onActivate, onToggle, onOpen }) {
+function isPdfFile(entry) {
+  return entry?.type === 'file' && /\.pdf$/i.test(entry.name);
+}
+
+function isPngFile(entry) {
+  return entry?.type === 'file' && /\.png$/i.test(entry.name);
+}
+
+function EntryRow({ entry, selected, current, onActivate, onToggle, onOpen, onPreview }) {
   const directory = entry.type === 'directory';
   const unsupported = !isCopyable(entry);
   const Icon = directory ? Folder : File;
@@ -74,7 +84,10 @@ function EntryRow({ entry, selected, current, onActivate, onToggle, onOpen }) {
       aria-label={`${entry.type} ${entry.name}`}
       tabIndex={current ? 0 : -1}
       onClick={() => onActivate(entry)}
-      onDoubleClick={() => directory && onOpen(entry)}
+      onDoubleClick={() => {
+        if (directory) onOpen(entry);
+        else if (isPngFile(entry)) onPreview(entry);
+      }}
       onFocus={() => onActivate(entry)}
     >
       <div className="commander-file-select">
@@ -123,6 +136,7 @@ function CommanderPanel({
   onActivateEntry,
   onToggle,
   onOpenDirectory,
+  onPreviewImage,
   onKeyDown
 }) {
   const label = panelKey === 'left' ? 'Left panel' : 'Right panel';
@@ -214,6 +228,7 @@ function CommanderPanel({
             onActivate={entryToActivate => onActivateEntry(panelKey, entryToActivate)}
             onToggle={name => onToggle(panelKey, name)}
             onOpen={entryToOpen => onOpenDirectory(panelKey, entryToOpen)}
+            onPreview={entryToPreview => onPreviewImage(panelKey, entryToPreview)}
           />
         )) : (
           <div className="commander-empty">
@@ -245,6 +260,8 @@ export default function CommanderView({ onNotify, onRefresh }) {
   const [replaceExisting, setReplaceExisting] = useState(false);
   const [loadingPanel, setLoadingPanel] = useState({ left: false, right: false });
   const [copyState, setCopyState] = useState(null);
+  const [conversionState, setConversionState] = useState(null);
+  const [previewFile, setPreviewFile] = useState(null);
   const [copyJob, setCopyJob] = useState(null);
   const requestIds = useRef({ left: 0, right: 0 });
   const listRefs = useRef({ left: null, right: null });
@@ -268,8 +285,19 @@ export default function CommanderView({ onNotify, onRefresh }) {
       panels[panelKey].entries.filter(entry => !query || entry.name.toLowerCase().includes(query))
     ])
   ), [panels, query]);
-  const isBusy = Object.values(loadingPanel).some(Boolean) || copyState?.phase === 'copying' || copyJob?.status === 'running';
+  const isBusy = Object.values(loadingPanel).some(Boolean)
+    || copyState?.phase === 'copying'
+    || conversionState?.phase === 'converting'
+    || copyJob?.status === 'running';
   const selectedCount = PANEL_KEYS.reduce((total, panelKey) => total + panels[panelKey].selectedNames.size, 0);
+  const activeSelection = panels[activePanel].entries.filter(entry => panels[activePanel].selectedNames.has(entry.name));
+  const canCopyAsPng = activeSelection.length > 0
+    && activeSelection.every(isPdfFile)
+    && Boolean(panels[activePanel].path)
+    && Boolean(panels[activePanel === 'left' ? 'right' : 'left'].path);
+  const canPreviewPng = activeSelection.length === 1
+    && isPngFile(activeSelection[0])
+    && Boolean(panels[activePanel].path);
 
   const updatePanel = (panelKey, updates) => {
     setPanels(current => ({
@@ -342,6 +370,16 @@ export default function CommanderView({ onNotify, onRefresh }) {
 
   const clearSelection = panelKey => updatePanel(panelKey, { selectedNames: new Set() });
 
+  const openPngPreview = (panelKey, entry) => {
+    const directoryPath = panels[panelKey].path;
+    if (!directoryPath || !isPngFile(entry)) return;
+    setPreviewFile({
+      name: entry.name,
+      path: joinLocalPath(directoryPath, entry.name),
+      size: entry.size
+    });
+  };
+
   const openDirectory = (panelKey, entry) => {
     const panel = panels[panelKey];
     loadPanel(panelKey, joinLocalPath(panel.path, entry.name));
@@ -376,6 +414,9 @@ export default function CommanderView({ onNotify, onRefresh }) {
     if (event.key === 'Enter' && currentEntry?.type === 'directory') {
       event.preventDefault();
       openDirectory(panelKey, currentEntry);
+    } else if (event.key === 'Enter' && isPngFile(currentEntry)) {
+      event.preventDefault();
+      openPngPreview(panelKey, currentEntry);
     } else if (event.key === ' ' && currentEntry && isCopyable(currentEntry)) {
       event.preventDefault();
       toggleSelection(panelKey, currentEntry.name);
@@ -446,6 +487,7 @@ export default function CommanderView({ onNotify, onRefresh }) {
 
     setActivePanel(sourceKey);
     stopPolling();
+    setConversionState(null);
     setCopyState({ phase: 'copying', sourceKey, destinationKey, entries });
 
     try {
@@ -502,6 +544,75 @@ export default function CommanderView({ onNotify, onRefresh }) {
     }
   };
 
+  const copyAsPng = async () => {
+    const sourceKey = activePanel;
+    const destinationKey = sourceKey === 'left' ? 'right' : 'left';
+    const source = panels[sourceKey];
+    const destination = panels[destinationKey];
+    const selectedEntries = source.entries.filter(entry => source.selectedNames.has(entry.name));
+    const entries = selectedEntries.filter(isPdfFile).map(entry => entry.name);
+
+    if (entries.length === 0 || entries.length !== selectedEntries.length) {
+      onNotify?.('Select only PDF files in the active panel to use Copy as…', 'warning');
+      return;
+    }
+    if (!source.path || !destination.path) {
+      onNotify?.('Open both panels before copying PDFs as PNG.', 'warning');
+      return;
+    }
+    if (isBusy) return;
+
+    setCopyState(null);
+    setConversionState({ phase: 'converting', sourceKey, destinationKey, entries });
+
+    try {
+      const response = await apiFetch('/api/local/convert/pdf-to-png', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          sourcePath: source.path,
+          destinationPath: destination.path,
+          entries,
+          overwrite: replaceExisting
+        })
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        const message = data.code === 'DESTINATION_EXISTS'
+          ? `${data.error || 'PNG files already exist.'} Enable Replace existing files to overwrite them.`
+          : data.error || 'Could not copy the selected PDFs as PNG.';
+        throw new Error(message);
+      }
+
+      await loadPanel(destinationKey, destination.path, false);
+      const errors = Array.isArray(data.errors) ? data.errors : [];
+      setConversionState({
+        phase: errors.length ? 'partial' : 'complete',
+        sourceKey,
+        destinationKey,
+        entries,
+        filesCopied: data.filesCopied || 0,
+        errors
+      });
+      onNotify?.(
+        errors.length
+          ? `Copied ${data.filesCopied || 0} PNG page(s); ${errors.length} item(s) need attention.`
+          : `Copied ${data.filesCopied || 0} PNG page(s) to the ${destinationKey} panel.`,
+        errors.length ? 'warning' : 'success'
+      );
+      onRefresh?.();
+    } catch (error) {
+      setConversionState({
+        phase: 'error',
+        sourceKey,
+        destinationKey,
+        entries,
+        message: error.message || 'Could not copy the selected PDFs as PNG.'
+      });
+      onNotify?.(error.message || 'Could not copy the selected PDFs as PNG.', 'error');
+    }
+  };
+
   const copyStatus = copyJob?.status === 'suspended'
     ? `Copy suspended (paused). Click Resume to continue copying.`
     : copyJob?.status === 'running'
@@ -513,6 +624,16 @@ export default function CommanderView({ onNotify, onRefresh }) {
           : copyState?.phase === 'complete'
             ? `${copyState.copied?.length || 0} item(s) copied · ${copyState.errors?.length || 0} error(s)`
             : 'Select entries in either panel and copy them to the other directory.';
+  const conversionStatus = conversionState?.phase === 'converting'
+    ? `Converting ${conversionState.entries.length} PDF(s) to 300 DPI PNG pages from ${conversionState.sourceKey} to ${conversionState.destinationKey}…`
+    : conversionState?.phase === 'error'
+      ? conversionState.message
+      : conversionState?.phase === 'partial'
+        ? `Copied ${conversionState.filesCopied} PNG page(s) · ${conversionState.errors.length} item(s) need attention`
+        : conversionState?.phase === 'complete'
+          ? `${conversionState.filesCopied} PNG page(s) copied to the ${conversionState.destinationKey} panel.`
+          : null;
+  const operationStatus = conversionStatus || copyStatus;
 
   return (
     <div className="commander-view">
@@ -547,6 +668,24 @@ export default function CommanderView({ onNotify, onRefresh }) {
           </button>
           <button type="button" className="btn btn-primary" onClick={() => copyFrom('right')} disabled={isBusy || !panels.right.selectedNames.size}>
             <ArrowLeft size={16} /> Copy selected to left
+          </button>
+          <button
+            type="button"
+            className="btn btn-secondary"
+            onClick={copyAsPng}
+            disabled={isBusy || !canCopyAsPng}
+            title="Copy selected PDFs as 300 DPI PNG page images to the opposite panel"
+          >
+            <File size={16} /> Copy as...
+          </button>
+          <button
+            type="button"
+            className="btn btn-secondary"
+            onClick={() => openPngPreview(activePanel, activeSelection[0])}
+            disabled={!canPreviewPng}
+            title="Preview the selected PNG at full resolution"
+          >
+            <Eye size={16} /> Preview PNG
           </button>
         </div>
       </section>
@@ -594,9 +733,13 @@ export default function CommanderView({ onNotify, onRefresh }) {
         </div>
       )}
 
-      <div className={`commander-operation-note${copyState?.phase === 'error' ? ' commander-operation-note-error' : ''}`}>
-        {copyState?.phase === 'copying' ? <LoaderCircle size={16} className="animate-spin" /> : copyState?.phase === 'error' ? <CircleAlert size={16} /> : <CheckCircle2 size={16} />}
-        <span>{copyStatus}</span>
+      <div className={`commander-operation-note${copyState?.phase === 'error' || conversionState?.phase === 'error' ? ' commander-operation-note-error' : ''}`}>
+        {copyState?.phase === 'copying' || conversionState?.phase === 'converting'
+          ? <LoaderCircle size={16} className="animate-spin" />
+          : copyState?.phase === 'error' || conversionState?.phase === 'error'
+            ? <CircleAlert size={16} />
+            : <CheckCircle2 size={16} />}
+        <span>{operationStatus}</span>
       </div>
 
       <div className="commander-list-toolbar">
@@ -631,12 +774,15 @@ export default function CommanderView({ onNotify, onRefresh }) {
             onActivateEntry={activateEntry}
             onToggle={toggleSelection}
             onOpenDirectory={openDirectory}
+            onPreviewImage={openPngPreview}
             onKeyDown={handlePanelKeyDown}
           />
         ))}
       </div>
 
-      <p className="commander-footnote"><strong>Enter a path</strong> to open any server-local directory. Double-click a folder to enter it, <strong>Tab</strong> switches panels, <strong>Space</strong> selects the current entry, and the copy buttons transfer selected files or directories without overwriting unless enabled.</p>
+      <p className="commander-footnote"><strong>Enter a path</strong> to open any server-local directory. Double-click a folder to enter it or a PNG to preview it, <strong>Tab</strong> switches panels, <strong>Space</strong> selects the current entry, and <strong>Copy as...</strong> converts selected PDFs to 300 DPI PNG page images in the opposite panel.</p>
+
+      {previewFile && <ServerPngPreview file={previewFile} onClose={() => setPreviewFile(null)} />}
     </div>
   );
 }

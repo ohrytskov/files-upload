@@ -9,8 +9,14 @@ const config = require('./lib/config');
 const { initWebSocketServer, calculateServerHash } = require('./lib/ws-server');
 const { generateHashes, normalizeHashAlgorithm } = require('./lib/hash-generator');
 const { isInternalUploadFile, normalizeFilename, normalizeRelativePath, resolveSafePath } = require('./lib/path-utils');
-const { copyLocalEntries, listLocalDirectory } = require('./lib/local-filesystem');
+const {
+  copyLocalEntries,
+  getPathApi,
+  listLocalDirectory,
+  normalizeLocalPath
+} = require('./lib/local-filesystem');
 const { copyManager } = require('./lib/copy-manager');
+const { convertPdfsToPng } = require('./lib/pdf-conversion');
 const { ResumableUploadManager } = require('./lib/resumable-upload');
 const {
   clearAuthCookie,
@@ -477,6 +483,90 @@ app.get('/api/local/list', async (req, res) => {
   }
 });
 
+app.post('/api/local/preview/png', mutationRateLimit, async (req, res) => {
+  let fileHandle;
+  try {
+    const requestedPath = Array.isArray(req.body?.path) ? null : req.body?.path;
+    const resolvedPath = normalizeLocalPath(requestedPath);
+    const pathApi = getPathApi(resolvedPath);
+    if (pathApi.extname(resolvedPath).toLowerCase() !== '.png') {
+      return res.status(415).json({ error: 'Only PNG images can be previewed.' });
+    }
+
+    const listedStats = await fs.promises.lstat(resolvedPath);
+    if (listedStats.isSymbolicLink()) {
+      return res.status(400).json({ error: 'Symbolic links cannot be previewed.' });
+    }
+    if (!listedStats.isFile()) {
+      return res.status(400).json({ error: 'Only regular PNG files can be previewed.' });
+    }
+
+    const openFlags = fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0);
+    fileHandle = await fs.promises.open(resolvedPath, openFlags);
+    const fileStats = await fileHandle.stat();
+    if (!fileStats.isFile()) {
+      await fileHandle.close();
+      fileHandle = null;
+      return res.status(400).json({ error: 'Only regular PNG files can be previewed.' });
+    }
+    if (listedStats.ino && fileStats.ino && (listedStats.dev !== fileStats.dev || listedStats.ino !== fileStats.ino)) {
+      await fileHandle.close();
+      fileHandle = null;
+      return res.status(409).json({ error: 'The PNG changed while it was being opened. Try again.' });
+    }
+
+    const signature = Buffer.alloc(8);
+    const { bytesRead } = await fileHandle.read(signature, 0, signature.length, 0);
+    const isPng = bytesRead === 8 && signature.equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]));
+    if (!isPng) {
+      await fileHandle.close();
+      fileHandle = null;
+      return res.status(415).json({ error: 'This file is not a valid PNG image.' });
+    }
+
+    res.setHeader('Content-Type', 'image/png');
+    res.setHeader('Content-Length', String(fileStats.size));
+    res.setHeader('Content-Disposition', `inline; filename*=UTF-8''${encodeURIComponent(pathApi.basename(resolvedPath))}`);
+    res.setHeader('Cache-Control', 'private, no-store');
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('Cross-Origin-Resource-Policy', 'same-origin');
+
+    const imageStream = fileHandle.createReadStream({ start: 0, autoClose: true });
+    fileHandle = null;
+    res.on('close', () => imageStream.destroy());
+    imageStream.on('error', () => {
+      if (res.headersSent) res.destroy();
+      else res.status(500).json({ error: 'Could not read this PNG image.' });
+    });
+    imageStream.pipe(res);
+  } catch (error) {
+    if (fileHandle) {
+      try {
+        await fileHandle.close();
+      } catch (closeError) {}
+    }
+
+    const statusByCode = {
+      INVALID_PATH: 400,
+      ENOENT: 404,
+      ENOTDIR: 404,
+      EACCES: 403,
+      EPERM: 403,
+      ELOOP: 400
+    };
+    const messageByCode = {
+      INVALID_PATH: 'Provide a valid server-local file path.',
+      ENOENT: 'The PNG file could not be found.',
+      ENOTDIR: 'The PNG file could not be found.',
+      EACCES: 'Permission denied while reading this PNG.',
+      EPERM: 'Permission denied while reading this PNG.',
+      ELOOP: 'Symbolic links cannot be previewed.'
+    };
+    const status = statusByCode[error.code] || 500;
+    return res.status(status).json({ error: messageByCode[error.code] || 'Could not load this PNG preview.' });
+  }
+});
+
 app.post('/api/local/copy', mutationRateLimit, async (req, res) => {
   const { sourcePath, destinationPath, entries, overwrite = false, stateful = false, async: asyncMode = false } = req.body || {};
 
@@ -511,6 +601,61 @@ app.post('/api/local/copy', mutationRateLimit, async (req, res) => {
     });
   } catch (error) {
     sendLocalFilesystemError(res, error, 'Failed to copy local entries');
+  }
+});
+
+app.post('/api/local/convert/pdf-to-png', mutationRateLimit, async (req, res) => {
+  const { sourcePath, destinationPath, entries, overwrite = false } = req.body || {};
+
+  try {
+    const result = await convertPdfsToPng({ sourcePath, destinationPath, entries, overwrite });
+    if (result.filesCopied === 0) {
+      return res.status(422).json({
+        error: 'No PDF pages were converted.',
+        ...result
+      });
+    }
+    return res.json({
+      message: result.errors.length > 0
+        ? 'PDF conversion completed with errors.'
+        : 'PDF conversion completed successfully.',
+      destinationPath,
+      ...result
+    });
+  } catch (error) {
+    const statusByCode = {
+      INVALID_ENTRY: 400,
+      INVALID_OPTION: 400,
+      INVALID_PATH: 400,
+      INVALID_PDF: 400,
+      INVALID_DESTINATION: 400,
+      NOT_DIRECTORY: 400,
+      SYMBOLIC_LINK: 400,
+      NOT_FOUND: 404,
+      PERMISSION_DENIED: 403,
+      DESTINATION_EXISTS: 409,
+      OUTPUT_NAME_COLLISION: 409
+    };
+    const messagesByCode = {
+      INVALID_ENTRY: 'Select one or more PDF files.',
+      INVALID_OPTION: 'Invalid conversion options.',
+      INVALID_PATH: 'Provide valid source and destination paths.',
+      INVALID_PDF: 'Only regular PDF files can be copied as PNG.',
+      INVALID_DESTINATION: 'A PNG destination name is not a regular file.',
+      NOT_DIRECTORY: 'Source and destination paths must be directories.',
+      SYMBOLIC_LINK: 'Symbolic links cannot be converted.',
+      NOT_FOUND: 'A source or destination path could not be found.',
+      PERMISSION_DENIED: 'Permission denied while converting PDF files.',
+      DESTINATION_EXISTS: error.message,
+      OUTPUT_NAME_COLLISION: error.message
+    };
+    const status = statusByCode[error.code] || 500;
+    const response = {
+      error: messagesByCode[error.code] || 'Could not convert the selected PDF files.',
+      code: error.code || 'CONVERSION_FAILED'
+    };
+    if (error.code === 'DESTINATION_EXISTS') response.conflicts = error.conflicts || [];
+    return res.status(status).json(response);
   }
 });
 
