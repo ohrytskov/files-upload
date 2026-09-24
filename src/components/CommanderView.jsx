@@ -5,6 +5,7 @@ import {
   CheckCircle2,
   ChevronUp,
   CircleAlert,
+  Download,
   Eye,
   File,
   Folder,
@@ -298,6 +299,9 @@ export default function CommanderView({ onNotify, onRefresh }) {
   const canPreviewPng = activeSelection.length === 1
     && isPngFile(activeSelection[0])
     && Boolean(panels[activePanel].path);
+  const canDownloadFile = activeSelection.length === 1
+    && activeSelection[0].type === 'file'
+    && Boolean(panels[activePanel].path);
 
   const updatePanel = (panelKey, updates) => {
     setPanels(current => ({
@@ -378,6 +382,16 @@ export default function CommanderView({ onNotify, onRefresh }) {
       path: joinLocalPath(directoryPath, entry.name),
       size: entry.size
     });
+  };
+
+  const downloadSelectedFile = () => {
+    if (!canDownloadFile) return;
+    const entry = activeSelection[0];
+    const filePath = joinLocalPath(panels[activePanel].path, entry.name);
+    const link = document.createElement('a');
+    link.href = `/api/local/download?path=${encodeURIComponent(filePath)}`;
+    link.download = entry.name;
+    link.click();
   };
 
   const openDirectory = (panelKey, entry) => {
@@ -681,6 +695,15 @@ export default function CommanderView({ onNotify, onRefresh }) {
           <button
             type="button"
             className="btn btn-secondary"
+            onClick={downloadSelectedFile}
+            disabled={!canDownloadFile}
+            title="Download the selected file to this device"
+          >
+            <Download size={16} /> Download selected
+          </button>
+          <button
+            type="button"
+            className="btn btn-secondary"
             onClick={() => openPngPreview(activePanel, activeSelection[0])}
             disabled={!canPreviewPng}
             title="Preview the selected PNG at full resolution"
@@ -780,7 +803,7 @@ export default function CommanderView({ onNotify, onRefresh }) {
         ))}
       </div>
 
-      <p className="commander-footnote"><strong>Enter a path</strong> to open any server-local directory. Double-click a folder to enter it or a PNG to preview it, <strong>Tab</strong> switches panels, <strong>Space</strong> selects the current entry, and <strong>Copy as...</strong> converts selected PDFs to 300 DPI PNG page images in the opposite panel.</p>
+      <p className="commander-footnote"><strong>Enter a path</strong> to open any server-local directory. Double-click a folder to enter it or a PNG to preview it, select a regular file and choose <strong>Download selected</strong> to save it to this device, <strong>Tab</strong> switches panels, <strong>Space</strong> selects the current entry, and <strong>Copy as...</strong> converts selected PDFs to 300 DPI PNG page images in the opposite panel.</p>
 
       {previewFile && <ServerPngPreview file={previewFile} onClose={() => setPreviewFile(null)} />}
     </div>

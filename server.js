@@ -483,6 +483,74 @@ app.get('/api/local/list', async (req, res) => {
   }
 });
 
+app.get('/api/local/download', async (req, res) => {
+  let fileHandle;
+  try {
+    const requestedPath = Array.isArray(req.query.path) ? null : req.query.path;
+    const resolvedPath = normalizeLocalPath(requestedPath);
+    const pathApi = getPathApi(resolvedPath);
+    const listedStats = await fs.promises.lstat(resolvedPath);
+    if (listedStats.isSymbolicLink() || !listedStats.isFile()) {
+      return res.status(400).json({ error: 'Only regular files can be downloaded.' });
+    }
+
+    const openFlags = fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0);
+    fileHandle = await fs.promises.open(resolvedPath, openFlags);
+    const fileStats = await fileHandle.stat();
+    if (!fileStats.isFile()) {
+      await fileHandle.close();
+      fileHandle = null;
+      return res.status(400).json({ error: 'Only regular files can be downloaded.' });
+    }
+    if (listedStats.ino && fileStats.ino && (listedStats.dev !== fileStats.dev || listedStats.ino !== fileStats.ino)) {
+      await fileHandle.close();
+      fileHandle = null;
+      return res.status(409).json({ error: 'The file changed while it was being opened. Try again.' });
+    }
+
+    const filename = pathApi.basename(resolvedPath);
+    res.setHeader('Content-Type', 'application/octet-stream');
+    res.setHeader('Content-Length', String(fileStats.size));
+    res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(filename)}`);
+    res.setHeader('Cache-Control', 'private, no-store');
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+
+    const fileStream = fileHandle.createReadStream({ start: 0, autoClose: true });
+    fileHandle = null;
+    res.on('close', () => fileStream.destroy());
+    fileStream.on('error', () => {
+      if (res.headersSent) res.destroy();
+      else res.status(500).json({ error: 'Could not read this file.' });
+    });
+    fileStream.pipe(res);
+  } catch (error) {
+    if (fileHandle) {
+      try {
+        await fileHandle.close();
+      } catch (closeError) {}
+    }
+
+    const statusByCode = {
+      INVALID_PATH: 400,
+      ENOENT: 404,
+      ENOTDIR: 404,
+      EACCES: 403,
+      EPERM: 403,
+      ELOOP: 400
+    };
+    const messageByCode = {
+      INVALID_PATH: 'Provide a valid server-local file path.',
+      ENOENT: 'The file could not be found.',
+      ENOTDIR: 'The file could not be found.',
+      EACCES: 'Permission denied while reading this file.',
+      EPERM: 'Permission denied while reading this file.',
+      ELOOP: 'Symbolic links cannot be downloaded.'
+    };
+    const status = statusByCode[error.code] || 500;
+    return res.status(status).json({ error: messageByCode[error.code] || 'Could not download this file.' });
+  }
+});
+
 app.post('/api/local/preview/png', mutationRateLimit, async (req, res) => {
   let fileHandle;
   try {
