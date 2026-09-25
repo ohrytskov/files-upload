@@ -12,8 +12,9 @@ export default function Sidebar({ activeTab, setActiveTab, stats, authToken, onA
     setDraftToken(authToken);
   }, [authToken]);
 
-  const commitToken = () => {
-    if (draftToken !== authToken) onAuthTokenChange(draftToken);
+  const commitToken = (event) => {
+    event.preventDefault();
+    onAuthTokenChange(draftToken);
   };
 
   return (
@@ -69,23 +70,21 @@ export default function Sidebar({ activeTab, setActiveTab, stats, authToken, onA
           <span>{usedMB} MB used</span>
           <span>{maxMB > 0 ? `${maxMB} MB Limit` : 'No configured limit'}</span>
         </div>
-        <label className="auth-token-field">
-          <span><KeyRound size={14} /> API token</span>
-          <input
-            type="password"
-            value={draftToken}
-            onChange={(event) => setDraftToken(event.target.value)}
-            onBlur={commitToken}
-            onKeyDown={(event) => {
-              if (event.key === 'Enter') {
-                event.preventDefault();
-                event.currentTarget.blur();
-              }
-            }}
-            placeholder="Optional"
-            autoComplete="off"
-          />
-        </label>
+        <form className="auth-token-form" onSubmit={commitToken}>
+          <label className="auth-token-field">
+            <span><KeyRound size={14} /> API token</span>
+            <input
+              type="password"
+              value={draftToken}
+              onChange={(event) => setDraftToken(event.target.value)}
+              placeholder="Optional"
+              autoComplete="new-password"
+            />
+          </label>
+          <button className="auth-token-submit" type="submit">
+            {draftToken.trim() ? 'Connect' : 'Apply'}
+          </button>
+        </form>
       </div>
     </aside>
   );

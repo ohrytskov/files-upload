@@ -164,9 +164,15 @@ body {
   display: flex;
   flex-direction: column;
   gap: 6px;
-  margin-top: 14px;
   color: var(--text-muted);
   font-size: 0.74rem;
+}
+
+.auth-token-form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 14px;
 }
 
 .auth-token-field span {
@@ -188,6 +194,23 @@ body {
 
 .auth-token-field input:focus {
   border-color: var(--border-focus);
+}
+
+.auth-token-submit {
+  align-self: flex-end;
+  padding: 6px 10px;
+  color: var(--text-main);
+  background: var(--accent-primary);
+  border: 0;
+  border-radius: var(--radius-sm);
+  font: inherit;
+  font-size: 0.74rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.auth-token-submit:hover {
+  background: var(--accent-primary-hover);
 }
 
 .main-content {

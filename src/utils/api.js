@@ -39,5 +39,9 @@ export function apiFetch(input, init = {}) {
   const token = getAuthToken();
   if (token) headers.set('Authorization', `Bearer ${token}`);
 
-  return fetch(input, { ...init, headers });
+  return fetch(input, {
+    ...init,
+    credentials: init.credentials ?? 'same-origin',
+    headers
+  });
 }
